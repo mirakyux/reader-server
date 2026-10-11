@@ -53,7 +53,7 @@ public class PackageDocumentMetadataWriter extends PackageDocumentBase {
           author.getRelator().getCode());
       serializer.attribute(NAMESPACE_OPF, OPFAttributes.file_as,
           author.getLastname() + ", " + author.getFirstname());
-      serializer.text(author.getFirstname() + " " + author.getLastname());
+      serializer.text((author.getFirstname() + " " + author.getLastname()).trim());
       serializer.endTag(NAMESPACE_DUBLIN_CORE, DCTags.creator);
     }
 
@@ -64,7 +64,7 @@ public class PackageDocumentMetadataWriter extends PackageDocumentBase {
           author.getRelator().getCode());
       serializer.attribute(NAMESPACE_OPF, OPFAttributes.file_as,
           author.getLastname() + ", " + author.getFirstname());
-      serializer.text(author.getFirstname() + " " + author.getLastname());
+      serializer.text((author.getFirstname() + " " + author.getLastname()).trim());
       serializer.endTag(NAMESPACE_DUBLIN_CORE, DCTags.contributor);
     }
 
@@ -118,15 +118,6 @@ public class PackageDocumentMetadataWriter extends PackageDocumentBase {
     serializer
         .attribute(EpubWriter.EMPTY_NAMESPACE_PREFIX, OPFAttributes.content,
             Constants.EPUB_GENERATOR_NAME);
-    serializer.endTag(NAMESPACE_OPF, OPFTags.meta);
-
-    // write duokan
-    serializer.startTag(NAMESPACE_OPF, OPFTags.meta);
-    serializer.attribute(EpubWriter.EMPTY_NAMESPACE_PREFIX, OPFAttributes.name,
-            OPFValues.duokan);
-    serializer
-            .attribute(EpubWriter.EMPTY_NAMESPACE_PREFIX, OPFAttributes.content,
-                    Constants.EPUB_DUOKAN_NAME);
     serializer.endTag(NAMESPACE_OPF, OPFTags.meta);
 
     serializer.endTag(NAMESPACE_OPF, OPFTags.metadata);

@@ -24,6 +24,7 @@ data class SearchBook(
     var origin: String = "",                     // 书源规则
     var originName: String = "",
     var type: Int = 0,                          // @BookType
+    var downloadUrls: List<String>? = null,
     override var name: String = "",
     override var author: String = "",
     override var kind: String? = null,
@@ -97,6 +98,7 @@ data class SearchBook(
             origin = origin,
             originName = originName,
             type = type,
+            downloadUrls = downloadUrls,
             wordCount = wordCount,
             latestChapterTitle = latestChapterTitle,
             coverUrl = coverUrl,

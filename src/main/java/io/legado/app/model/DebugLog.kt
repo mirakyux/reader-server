@@ -2,7 +2,7 @@ package io.legado.app.model
 
 import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookChapter
-import mu.KotlinLogging
+import io.github.oshai.kotlinlogging.KotlinLogging
 import okhttp3.logging.HttpLoggingInterceptor
 
 private val logger = KotlinLogging.logger {}
@@ -13,10 +13,10 @@ interface DebugLog: HttpLoggingInterceptor.Logger {
         msg: String? = "",
         isHtml: Boolean = false
     ) {
-        logger.info("sourceUrl: {}, msg: {}", sourceUrl, msg)
+        logger.info { "sourceUrl: ${sourceUrl}, msg: ${msg}" }
     }
 
     override fun log(message: String) {
-        logger.debug(message)
+        logger.debug { message }
     }
 }

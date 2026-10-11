@@ -8,6 +8,7 @@ import io.legado.app.data.entities.rule.ContentRule
 import io.legado.app.model.DebugLog
 import io.legado.app.model.analyzeRule.AnalyzeRule
 import io.legado.app.model.analyzeRule.AnalyzeUrl
+import io.legado.app.model.analyzeRule.getCheckedResponse
 import io.legado.app.utils.NetworkUtils
 import io.legado.app.utils.HtmlFormatter
 import kotlinx.coroutines.CoroutineScope
@@ -42,6 +43,7 @@ object BookContent {
         val nextUrlList = arrayListOf(redirectUrl)
         val contentRule = bookSource.getContentRule()
         val analyzeRule = AnalyzeRule(book, bookSource).setContent(body, baseUrl)
+        analyzeRule.chapter = bookChapter
         analyzeRule.setRedirectUrl(redirectUrl)
         analyzeRule.nextChapterUrl = mNextChapterUrl
         var contentData = analyzeContent(
@@ -60,8 +62,9 @@ object BookContent {
                     mUrl = nextUrl,
                     source = bookSource,
                     ruleData = book,
+                    chapter = bookChapter,
                     headerMapF = bookSource.getHeaderMap()
-                ).getStrResponseAwait(debugLog = debugLog)
+                ).getCheckedResponse(jsStr = contentRule.webJs, sourceRegex = contentRule.sourceRegex, debugLog = debugLog)
                 res.body?.let { nextBody ->
                     contentData = analyzeContent(
                         book, nextUrl, res.url, nextBody, contentRule,
@@ -83,9 +86,10 @@ object BookContent {
                             mUrl = urlStr,
                             source = bookSource,
                             ruleData = book,
+                            chapter = bookChapter,
                             headerMapF = bookSource.getHeaderMap()
                         )
-                        val res = analyzeUrl.getStrResponseAwait(debugLog = debugLog)
+                        val res = analyzeUrl.getCheckedResponse(jsStr = contentRule.webJs, sourceRegex = contentRule.sourceRegex, debugLog = debugLog)
                         analyzeContent(
                             book, urlStr, res.url, res.body!!, contentRule,
                             bookChapter, bookSource, mNextChapterUrl, false
@@ -95,6 +99,16 @@ object BookContent {
                 asyncArray.forEach { coroutine ->
                     content.append("\n").append(coroutine.await())
                 }
+            }
+        }
+        contentRule.subContent?.takeIf { it.isNotBlank() }?.let { rule ->
+            val raw = analyzeRule.getString(rule)
+            bookChapter.subContent = raw
+            if (book.type == 0 && raw.isNotBlank()) content.append("\n").append(raw)
+            else if (book.type == 1 || book.type == 4) {
+                val value = if (raw.trim().startsWith("http", true)) AnalyzeUrl(raw.trim(), source = bookSource, ruleData = book)
+                    .getStrResponseAwait(debugLog = debugLog).body else raw
+                if (book.type == 1) bookChapter.putLyric(value) else bookChapter.putDanmaku(value)
             }
         }
         var contentStr = content.toString()
@@ -132,6 +146,9 @@ object BookContent {
         analyzeRule.nextChapterUrl = nextChapterUrl
         val nextUrlList = arrayListOf<String>()
         analyzeRule.chapter = chapter
+        if (printLog && !contentRule.title.isNullOrBlank()) {
+            analyzeRule.getString(contentRule.title).takeIf { it.isNotBlank() }?.let { chapter.title = it }
+        }
         //获取正文
         var content = analyzeRule.getString(contentRule.content)
         content = HtmlFormatter.formatKeepImg(content, rUrl)

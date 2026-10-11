@@ -9,20 +9,31 @@ import io.legado.app.utils.NetworkUtils
 import io.legado.app.utils.MD5Utils
 import io.legado.app.utils.getFile
 import io.legado.app.model.analyzeRule.AnalyzeUrl
+import io.legado.app.model.jsSource.SourceActions
 import io.legado.app.model.localBook.LocalBook
 import java.io.File
-import java.util.concurrent.CopyOnWriteArraySet
-import kotlinx.coroutines.Deferred
+import java.net.URI
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import kotlinx.coroutines.async
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 //import org.apache.commons.text.similarity.JaccardSimilarity
 
 object BookHelp {
     private const val cacheImageFolderName = "images"
-    private val downloadImages = CopyOnWriteArraySet<String>()
+    private data class ImageKey(val source: String?, val book: String, val url: String)
+    private class ImageDownload(val mutex: Mutex = Mutex(), var callers: Int = 0)
+    private val downloadImages = mutableMapOf<ImageKey, ImageDownload>()
 
     private fun formatFolderName(folderName: String): String {
         return folderName.replace("[\\\\/:*?\"<>|.]".toRegex(), "")
@@ -55,16 +66,11 @@ object BookHelp {
     }
 
     fun getBookCacheDir(book: Book): File {
-        val md5Encode = MD5Utils.md5Encode(book.bookUrl).toString()
         val bookDir = book.getBookDir()
         if (bookDir.isEmpty()) {
             throw Exception("bookDir不能为空")
         }
-        val localCacheDir = File(bookDir).getFile(md5Encode)
-        if (!localCacheDir.exists()) {
-            localCacheDir.mkdirs()
-        }
-        return localCacheDir
+        return com.htmake.reader.api.service.ChapterCache.directory(book, File(bookDir))
     }
 
     /**
@@ -74,9 +80,7 @@ object BookHelp {
         val file = getBookCacheDir(book).getFile(
             String.format("%d.txt", bookChapter.index)
         )
-        if (file.exists()) {
-            return file.readText()
-        }
+        com.htmake.reader.api.service.ChapterCache.read(file.parentFile, bookChapter.index, bookChapter)?.let { return it }
         if (book.isLocalBook()) {
             val content = LocalBook.getContent(book, bookChapter)
             if (content != null && book.isEpub()) {
@@ -115,60 +119,61 @@ object BookHelp {
     ) {
         // if (content.isEmpty()) return
         //保存文本
-        FileUtils.createFileIfNotExist(
-            getBookCacheDir(book),
-            String.format("%d.txt", bookChapter.index)
-        ).writeText(content)
+        com.htmake.reader.api.service.ChapterCache.save(getBookCacheDir(book), bookChapter, content)
     }
 
+    @Suppress("UNUSED_PARAMETER") // Kept for existing callers; downloads belong to this suspending call.
     suspend fun saveImages(
         scope: CoroutineScope,
         bookSource: BookSource,
         book: Book,
         bookChapter: BookChapter,
         content: String
-    ) {
-        val awaitList = arrayListOf<Deferred<Int>>()
-        content.split("\n").forEach {
-            val matcher = AppPattern.imgPattern.matcher(it)
-            if (matcher.find()) {
-                matcher.group(1)?.let { src ->
-                    val mSrc = NetworkUtils.getAbsoluteURL(bookChapter.url, src)
-                    val req: Deferred<Int> = scope.async {
-                        saveImage(bookSource, book, mSrc)
-                        return@async 1
-                    }
-                    awaitList.add(req)
-                }
+    ) = coroutineScope {
+        val images = linkedSetOf<String>()
+        val matcher = AppPattern.imgPattern.matcher(content)
+        while (matcher.find()) {
+            matcher.group(1)?.let { src ->
+                images.add(if (src.startsWith("data:", true)) src else NetworkUtils.getAbsoluteURL(bookChapter.getAbsoluteURL(), src))
             }
         }
-        awaitList.forEach {
-            it.await()
-        }
+        images.map { src -> async { saveImage(bookSource, book, src, bookChapter) } }.awaitAll()
+        Unit
     }
 
-    suspend fun saveImage(bookSource: BookSource?, book: Book, src: String) {
-        while (downloadImages.contains(src)) {
-            delay(100)
+    suspend fun saveImage(
+        bookSource: BookSource?, book: Book, src: String,
+        chapter: BookChapter? = null, refresh: Boolean = false
+    ): Unit = withContext(Dispatchers.IO) {
+        val file = getImage(book, src)
+        val key = ImageKey(bookSource?.getStorageNamespace(), getBookCacheDir(book).canonicalPath, src)
+        val download = synchronized(downloadImages) {
+            downloadImages.getOrPut(key) { ImageDownload() }.also { it.callers++ }
         }
-        if (getImage(book, src).exists()) {
-            return
-        }
-        downloadImages.add(src)
-        val analyzeUrl = AnalyzeUrl(src, source = bookSource)
         try {
-            analyzeUrl.getByteArrayAwait().let {
-                FileUtils.createFileIfNotExist(
-                    getBookCacheDir(book),
-                    cacheImageFolderName,
-                    "${MD5Utils.md5Encode16(src)}.${getImageSuffix(src)}"
-                ).writeBytes(it)
+            download.mutex.withLock {
+                if (!refresh && file.isFile && file.length() > 0) return@withLock
+                val bytes = SourceActions.imageBytes(bookSource, src, false, book, chapter)
+                currentCoroutineContext().ensureActive()
+                file.parentFile.mkdirs()
+                val temporary = Files.createTempFile(file.parentFile.toPath(), file.name, ".part")
+                try {
+                    Files.write(temporary, bytes)
+                    currentCoroutineContext().ensureActive()
+                    try {
+                        Files.move(temporary, file.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                    } catch (_: AtomicMoveNotSupportedException) {
+                        Files.move(temporary, file.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                    }
+                } finally { Files.deleteIfExists(temporary) }
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
         } finally {
-            downloadImages.remove(src)
+            // Waiters retain the same mutex until the last caller leaves, including cancellation.
+            synchronized(downloadImages) {
+                if (--download.callers == 0) downloadImages.remove(key)
+            }
         }
+        Unit
     }
 
     fun getImage(book: Book, src: String): File {
@@ -179,12 +184,10 @@ object BookHelp {
     }
 
     fun getImageSuffix(src: String): String {
-        var suffix = src.substringAfterLast(".").substringBefore(",")
-        //检查截取的后缀字符是否合法 [a-zA-Z0-9]
-        val fileSuffixRegex = Regex("^[a-z0-9]+$", RegexOption.IGNORE_CASE)
-        if (suffix.length > 5 || !suffix.matches(fileSuffixRegex)) {
-            suffix = "jpg"
-        }
-        return suffix
+        val options = AnalyzeUrl.paramPattern.matcher(src)
+        val url = if (options.find()) src.substring(0, options.start()) else src
+        val path = runCatching { URI(url).path }.getOrNull().orEmpty()
+        val suffix = path.substringAfterLast('/').substringAfterLast('.', "").lowercase()
+        return suffix.takeIf { it.length in 1..5 && it.matches(Regex("[a-z0-9]+")) } ?: "jpg"
     }
 }

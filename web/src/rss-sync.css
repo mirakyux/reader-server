@@ -1,0 +1,5 @@
+.rss-debug { overflow: auto; max-height: 60vh; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; }
+.rss-article img { max-width: 100%; height: auto; }
+.remote-sync-status { overflow-wrap: anywhere; }
+.rss-source { gap: .35rem; }
+.rss-source > button:first-child { flex: 1; text-align: left; }

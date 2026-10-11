@@ -8,6 +8,8 @@ import io.legado.app.data.entities.rule.*
 import io.legado.app.exception.NoStackTraceException
 import io.legado.app.utils.*
 import io.legado.app.model.Debug
+import io.legado.app.model.jsSource.JsSourceConfig
+import com.google.gson.JsonParser
 import java.io.InputStream
 
 import java.util.regex.Pattern
@@ -36,7 +38,7 @@ object SourceAnalyzer {
                     }
                 }
                 else -> {
-                    throw NoStackTraceException("格式不对")
+                    bookSources.add(JsSourceConfig.extract(json))
                 }
             }
             bookSources
@@ -65,8 +67,36 @@ object SourceAnalyzer {
         }
     }
 
-    fun jsonToBookSource(json: String): Result<BookSource> {
-        val source = BookSource()
+    fun jsonToBookSource(json: String, userNameSpace: String = "default"): Result<BookSource> {
+        if (!json.trimStart().startsWith("{")) return runCatching { JsSourceConfig.extract(json).apply { runtimeUserNamespace = userNameSpace } }
+        val objectValue = runCatching { JsonParser.parseString(json).asJsonObject }.getOrNull()
+        val modernRules = listOf("ruleSearch", "ruleExplore", "ruleBookInfo", "ruleToc", "ruleContent", "ruleReview")
+        val legacyFields = listOf("ruleSearchUrl", "ruleChapterList", "ruleBookContent")
+        val modernFields = listOf("searchUrl", "exploreUrl", "header", "enabledCookieJar", "loginUrl", "loginUi", "loginCheckJs",
+            "concurrentRate", "customOrder", "enabled", "enabledExplore", "bookUrlPattern", "coverDecodeJs", "variableComment",
+            "exploreScreen", "eventListener", "customButton", "jsLib")
+        if (objectValue != null && (modernRules.any { objectValue.has(it) } || objectValue.has("mainJs") ||
+                (!legacyFields.any { objectValue.has(it) } && modernFields.any { objectValue.has(it) }))) {
+            return runCatching {
+                listOf("loginUi", "exploreUrl", "exploreScreen", "jsLib").forEach { field ->
+                    objectValue.get(field)?.takeIf { it.isJsonArray || it.isJsonObject }?.let { value ->
+                        objectValue.addProperty(field, value.toString())
+                    }
+                }
+                modernRules.forEach { field ->
+                    objectValue.get(field)?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.let {
+                        objectValue.add(field, JsonParser.parseString(it.asString))
+                    }
+                }
+                objectValue.get("loginUrl")?.takeIf { it.isJsonObject }?.let { objectValue.add("loginUrl", it.asJsonObject.get("url")) }
+                GSON.fromJson(objectValue, BookSource::class.java).also { value ->
+                    value.runtimeUserNamespace = userNameSpace
+                    preserveModernFields(value, objectValue)
+                    JsSourceConfig.validate(value)
+                }
+            }
+        }
+        val source = BookSource().apply { runtimeUserNamespace = userNameSpace }
         val sourceAny = GSON.fromJsonObject<BookSourceAny>(json.trim())
             .onFailure {
                 Debug.log("转化书源出错", it.localizedMessage)
@@ -167,11 +197,11 @@ object SourceAnalyzer {
                     is String -> sourceAny.loginUrl.toString()
                     else -> JsonPath.parse(sourceAny.loginUrl).readString("url")
                 }
-                // source.loginUi = if (sourceAny.loginUi is List<*>) {
-                //     GSON.toJson(sourceAny.loginUi)
-                // } else {
-                //     sourceAny.loginUi?.toString()
-                // }
+                source.loginUi = if (sourceAny.loginUi is List<*> || sourceAny.loginUi is Map<*, *>) {
+                    GSON.toJson(sourceAny.loginUi)
+                } else sourceAny.loginUi?.toString()
+                source.jsLib = sourceAny.jsLib
+                source.enabledCookieJar = sourceAny.enabledCookieJar
                 source.loginCheckJs = sourceAny.loginCheckJs
                 source.bookSourceComment = sourceAny.bookSourceComment
                 source.lastUpdateTime = sourceAny.lastUpdateTime
@@ -215,7 +245,18 @@ object SourceAnalyzer {
                         .getOrNull()
                 }
             }
+            objectValue?.let { preserveModernFields(source, it) }
             source
+        }
+    }
+
+    fun preserveModernFields(source: BookSource, json: com.google.gson.JsonObject) {
+        source.preserveFields(json)
+        val rules = mapOf("ruleSearch" to source.ruleSearch, "ruleExplore" to source.ruleExplore,
+            "ruleBookInfo" to source.ruleBookInfo, "ruleToc" to source.ruleToc,
+            "ruleContent" to source.ruleContent, "ruleReview" to source.ruleReview)
+        rules.forEach { (name, rule) ->
+            json.get(name)?.takeIf { it.isJsonObject }?.let { rule?.preserveFields(it.asJsonObject) }
         }
     }
 
@@ -233,6 +274,8 @@ object SourceAnalyzer {
         var loginUrl: Any? = null,                      // 登录规则
         var loginUi: Any? = null,                       // 登录UI
         var loginCheckJs: String? = null,               //登录检测js
+        var jsLib: String? = null,
+        var enabledCookieJar: Boolean? = true,
         var bookSourceComment: String? = "",            //书源注释
         var lastUpdateTime: Long = 0,                   // 最后更新时间，用于排序
         var respondTime: Long = 180000L,                // 响应时间，用于排序

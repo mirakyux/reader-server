@@ -1,0 +1,146 @@
+# reader-dev 与 FU 功能对照
+
+本报告记录 2026-10-09 补齐前的源码审计，参考 `E:/workspace/Java/legado_FU`。实施后的实际结果与剩余边界见 [FU 非 AI 功能补齐验收](fu-parity-verification.md)。用户后续明确排除 AI／Skills／MCP、听书和本地书解析，也不要求远程导出；下文保留原始差距，供追溯，不作为当前缺失清单。
+
+## 对照范围与判定方式
+
+| 项目 | 本次基准 |
+| --- | --- |
+| 当前项目 | `E:/workspace/Java/reader-dev`，HEAD 为 `fa22f27`，包含现有未提交的迁移及 EPUB 修复代码 |
+| 参考项目 | `E:/workspace/Java/legado_FU`，HEAD 为 `0a726331e`；该版本 README 使用 Legado NG 名称，本文沿用 FU 简称 |
+| 检查方式 | 追踪界面入口、API、解析器、存储和执行调用；参考实际代码，不只比较功能名称、模型字段或 README |
+| 实测范围 | 本轮为源码审计，未运行 FU Android 应用，未逐一测试外部书源、AI 或 TTS 服务 |
+| 修改范围 | 新增本对照文档，并在验收记录中注明范围；未修改应用代码、依赖或用户数据 |
+
+“主要链路已有”表示能找到入口和执行链路，不能据此保证所有第三方站点可用。“部分”表示只有基础实现或存在明确差异。“缺失”表示相关范围未找到可用的界面、API 和执行链路。“平台差异”需要为 Web 选择实现方式，不能直接搬用 Android API。
+
+本报告不计算完成百分比。规则兼容性、阅读体验和 Android 系统集成的权重不同，简单计数会掩盖实际问题。以下补齐次序按影响提出，不代表用户已经指定优先级。
+
+## 已确认的行为问题
+
+这些问题会影响已有功能，应与尚未开发的大功能分开处理。
+
+| 问题 | 当前行为与影响 | 证据 |
+| --- | --- | --- |
+| 单书净化开关未生效 | Web 阅读筛选替换规则时不检查 `book.useReplaceRule`；即使书籍关闭净化，仍可能替换标题和正文。后端导出已遵守该开关，两端不一致 | 当前 [matchingReplaceRules](E:/workspace/Java/reader-dev/web/src/lib/reading.ts:22)、[useReplacedText](E:/workspace/Java/reader-dev/web/src/lib/useReplacedText.ts:11)；FU [ContentProcessor](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/book/ContentProcessor.kt:154) |
+| RSS 下一页 URL 被丢弃 | API 返回文章和实际下一页 URL；React 只消费 `first`，忽略 `second`，下一次仍使用原分类 URL。依赖实际下一页地址的源会重复或错页 | 当前 [loadArticles](E:/workspace/Java/reader-dev/web/src/components/Journal.tsx:31)；FU [nextPageUrl](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/rss/article/RssArticlesViewModel.kt:63) |
+| 进度互通可能覆盖新进度 | 收到 WebDAV 进度后直接覆盖，没有比较新旧时间或位置；写出的 `durChapterPos` 固定为 0。进度目录不存在时直接返回，无法自动建立进度文件 | 当前 [接收进度](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/controller/BookController.kt:2077)、[写出进度](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/controller/BookController.kt:2100)；FU [进度筛选](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/AppWebDav.kt:322) |
+| 换源可能跳错章节 | 当前保留旧章节数字索引，没有按章节名称或章号匹配新目录；目录差异会导致阅读位置错误 | 当前 [换源界面](E:/workspace/Java/reader-dev/web/src/components/Reader.tsx:98)、[换源 API](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/controller/BookController.kt:1417)；FU [章节匹配](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/book/BookHelp.kt:463) |
+| 阅读图片解码缺少章节上下文 | 导出已传入章节上下文；阅读界面的解码请求及控制器没有传入 chapter。依赖章节标题或其他章节字段的解码脚本可能只在导出时成功 | 当前 [阅读工具](E:/workspace/Java/reader-dev/web/src/components/SourceFeatures.tsx:43)、[decodeSourceImage](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/controller/SourceActionController.kt:84)；FU [图片缓存](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/book/BookHelp.kt:222) |
+| FU 阅读记录没有进入统计 | 恢复流程接受 `readRecord.json`，但统计服务只读取 `reading-sessions.json`；导入旧记录后不会显示对应历史统计 | 当前 [恢复白名单](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/service/BackupArchive.kt:17)、[统计读取](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/service/advanced/ReadingStatistics.kt:43)；FU [记录恢复](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/storage/Restore.kt:193) |
+
+## 书源与规则兼容
+
+| 功能 | 当前状态 | 与 FU 的差异 | 依据 |
+| --- | --- | --- | --- |
+| 书源导入和管理 | 主要链路已有 | 旧 JSON 转换、现代 JSON、单文件 JS、远程预览、分组、批量启停／删除、导出已有；FU 还有自动分组、更多排序和状态管理 | 当前 [SourceAnalyzer](E:/workspace/Java/reader-dev/src/main/java/io/legado/app/utils/SourceAnalyzer.kt:22)、[Sources](E:/workspace/Java/reader-dev/web/src/components/Sources.tsx:14)；FU [BookSourceActivity](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/book/source/manage/BookSourceActivity.kt:550)、[自动分组](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/book/source/manage/BookSourceAutoGroup.kt) |
+| 基础规则语法 | 部分 | CSS／JSoup、XPath、JSONPath、正则、JS、`@put/@get` 已有；缺规则级 `@webjs:`。URL 的 `webJs` 和 `java.webView()` 不能代替该规则模式 | 当前 [规则模式](E:/workspace/Java/reader-dev/src/main/java/io/legado/app/model/analyzeRule/AnalyzeRule.kt:615)；FU [WebJs 执行](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/model/analyzeRule/AnalyzeRule.kt:176)、[规则拆分](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/model/analyzeRule/AnalyzeRule.kt:559) |
+| 搜索、发现及动态筛选 | 部分 | 单源／多源搜索、发现分页、text／button／toggle／select 和 `infoMap` 持久化已有；前端未完整消费动态 `viewName` 和控件样式，部分渲染仍使用原 `title` | 当前 [Library](E:/workspace/Java/reader-dev/web/src/components/Library.tsx:61)、[SourceActions](E:/workspace/Java/reader-dev/src/main/java/io/legado/app/model/jsSource/SourceActions.kt:105)、[发现界面](E:/workspace/Java/reader-dev/web/src/components/SourceFeatures.tsx:37)；FU [ExploreKind](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/data/entities/rule/ExploreKind.kt:13) |
+| 书籍详情和文件源 | 主要链路已有 | init、书名／作者／简介／封面／目录和文件源 `downloadUrls` 都有实际解析；不将普通详情规则列为占位功能 | 当前 [BookInfo](E:/workspace/Java/reader-dev/src/main/java/io/legado/app/model/webBook/BookInfo.kt:48)；FU [BookInfo](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/model/webBook/BookInfo.kt:59) |
+| 目录刷新 | 部分，有兼容缺口 | 分页、倒序、卷／VIP／付费标志和标题格式化已有；`preUpdateJs` 只保留字段，未执行。依赖目录刷新前续签或更改目录地址的源会受影响 | 当前 [TocRule](E:/workspace/Java/reader-dev/src/main/java/io/legado/app/data/entities/rule/TocRule.kt:4)、[getChapterList](E:/workspace/Java/reader-dev/src/main/java/io/legado/app/model/webBook/WebBook.kt:178)；FU [目录预处理](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/model/webBook/WebBook.kt:281) |
+| 正文获取及登录检查 | 部分，有兼容缺口 | 当前搜索／发现／详情／目录调用 `loginCheckJs`，正文首请求缺少调用；也缺 FU 的错误响应交给登录检查脚本的恢复路径。顺序正文分页没有继续传入 `contentRule.webJs` | 当前 [getBookContent](E:/workspace/Java/reader-dev/src/main/java/io/legado/app/model/webBook/WebBook.kt:214)、[正文分页](E:/workspace/Java/reader-dev/src/main/java/io/legado/app/model/webBook/BookContent.kt:60)；FU [正文登录检查](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/model/webBook/WebBook.kt:438)、[正文分页](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/model/webBook/BookContent.kt:74) |
+| URL 和 HTTP 扩展 | 部分 | GET／POST、请求头、body、charset、retry、proxy、webView／webJs 已有；缺 HEAD、`bodyJs` 响应处理、`dnsIp` 等选项 | 当前 [AnalyzeUrl](E:/workspace/Java/reader-dev/src/main/java/io/legado/app/model/analyzeRule/AnalyzeUrl.kt:165)；FU [HEAD／bodyJs](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/model/analyzeRule/AnalyzeUrl.kt:521)、[网络客户端](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/model/analyzeRule/AnalyzeUrl.kt:628) |
+| 单文件 JS 和 Java 桥接 | 部分 | search／explore／getBookInfo／getChapters／getContent、jsLib、CryptoJS 和常见加解密已有；缺 QuickJS 桥、请求 timeout 重载、`ajaxTestAll`、部分字节转换及 7z／rar 解压桥接 | 当前 [JsSourceEngine](E:/workspace/Java/reader-dev/src/main/java/io/legado/app/model/jsSource/JsSourceEngine.kt:17)、[JsExtensions](E:/workspace/Java/reader-dev/src/main/java/io/legado/app/help/JsExtensions.kt:136)；FU [QuickJS 桥](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/model/jsSource/JsSourceEngine.kt:51)、[ajaxTestAll](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/JsExtensions.kt:185)、[解压扩展](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/JsExtensions.kt:1005) |
+| Cookie 和书源私有状态 | 主要链路已有 | 按用户和书源隔离 Cookie／cache／登录信息；HTTP、JS 和浏览器同步 Cookie，浏览器 localStorage 持久化。不能再归为“没有 Cookie 支持” | 当前 [CookieStore](E:/workspace/Java/reader-dev/src/main/java/io/legado/app/help/http/CookieStore.kt:18)、[BrowserBridge](E:/workspace/Java/reader-dev/src/main/java/io/legado/app/help/source/BrowserBridge.kt:43)；FU [存储作用域](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/source/BookSourceStorageScope.kt:9) |
+| 登录表单 | 部分，有兼容缺口 | 静态表单和单文件 JS V2 登录动作已有；传统 JSON 源的 `loginUi: "@js:..."`／`<js>...</js>` 被直接当 JSON 解析，无法执行。旧 select 的 `chars`、倒计时和动态控件标签未齐 | 当前 [SourceLogin](E:/workspace/Java/reader-dev/src/main/java/io/legado/app/model/jsSource/SourceLogin.kt:12)、[表单界面](E:/workspace/Java/reader-dev/web/src/components/Sources.tsx:63)；FU [动态登录 UI](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/login/SourceLoginDialog.kt:185)、[chars](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/login/SourceLoginDialog.kt:218) |
+| 网页执行和人工验证 | 主要链路已有，平台不同 | 独立 Edge／Chromium 执行 DOM、捕获请求和跳转，截图操作支持点击／输入／键盘／滚动及保存 Cookie；浏览器等待和图片验证码已有。FU 使用 Android WebView，站点行为不能保证完全一致 | 当前 [SourceBrowserController](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/controller/SourceBrowserController.kt:23)、[browser 服务](E:/workspace/Java/reader-dev/browser/server.mjs:15)；FU [网页和验证桥](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/JsExtensions.kt:261) |
+| 书源编辑、调试和校验 | 部分 | JSON／基础／脚本编辑与串联调试已有；缺 FU 字段级编辑、补全、高亮和阶段时间线。校验仅执行搜索，没有全阶段及批量校验；调试“停止”只断开前端 EventSource，未取消后端任务 | 当前 [Sources](E:/workspace/Java/reader-dev/web/src/components/Sources.tsx:49)、[debug SSE](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/controller/BookController.kt:2485)、[checkBookSource](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/controller/SourceActionController.kt:59)；FU [编辑器](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/book/source/edit/BookSourceEditActivity.kt:69)、[完整校验](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/service/CheckSourceService.kt:303) |
+| 书源事件和购买动作 | 部分 | 已触发开始／结束／保存阅读、加／删书架和自定义动作；缺作者点击、分享、复制链接、书架刷新等完整触发点。购买动作有确认入口，实际网站扣费未验证 | 当前 [SourceFeatures](E:/workspace/Java/reader-dev/web/src/components/SourceFeatures.tsx:43)、[SourceActions](E:/workspace/Java/reader-dev/src/main/java/io/legado/app/model/jsSource/SourceActions.kt:58)；FU [SourceCallBack](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/model/SourceCallBack.kt:44)、[书架刷新](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/main/MainViewModel.kt:179) |
+
+本报告审计时缺少 `java.getQuickJsSandbox().evalString()`；后续已接入与 FU 同版本的真正引擎，最新验证见 [书源兼容验收](source-compatibility-verification.md)。FU 自身将此能力标为实验性。参考 [FU README](E:/workspace/Java/legado_FU/README.md:52) 和 [QuickJsSandboxBridge](E:/workspace/Java/legado_FU/modules/quickjs-sandbox/src/main/java/io/legado/app/quickjs/QuickJsSandboxBridge.kt:24)。
+
+段评不能列为“FU 完整实现、当前缺失”：FU 的 `getReviewRule` 被注释，转换函数返回 null。当前有自己的段评读取／引用原型，但段落 index 固定为 0，尚未完成按段定位、回复和点赞。依据为 [FU BookSource](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/data/entities/BookSource.kt:319) 和 [当前段评入口](E:/workspace/Java/reader-dev/web/src/components/SourceFeatures.tsx:47)。
+
+书源订阅更新也未对齐。当前可从远程 URL 手动导入，但未找到 FU `RuleSub` 的订阅清单、更新管理链路；恢复白名单中的 `sourceSubscription.json` 与 FU 实际的 `sourceSub.json` 也不同。参考 [当前 BackupArchive](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/service/BackupArchive.kt:17) 和 [FU 订阅备份](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/storage/Backup.kt:150)。
+
+## 书架、阅读与本地书
+
+| 功能 | 当前状态 | 与 FU 的差异 | 依据 |
+| --- | --- | --- | --- |
+| 书架、分组、追更 | 主要链路已有 | 筛选、分组、批量删除／分组、追更、最近阅读已有；书架为固定网格，缺 FU 布局模式、列数、间距、封面圆角和更多排序配置 | 当前 [Library](E:/workspace/Java/reader-dev/web/src/components/Library.tsx:19)、[ShelfManage](E:/workspace/Java/reader-dev/web/src/components/ShelfManage.tsx:6)；FU [书架布局](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/main/bookshelf/BookshelfLayoutDialog.kt:111) |
+| 基础阅读和目录 | 主要链路已有 | 网络正文、章节导航、本地 EPUB XHTML 读取已有。EPUB 采用 iframe，未接入 FU 统一排页引擎 | 当前 [Reader](E:/workspace/Java/reader-dev/web/src/components/Reader.tsx:48)、[MediaContent](E:/workspace/Java/reader-dev/web/src/components/MediaContent.tsx:21)；FU [TextPageFactory](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/book/read/page/provider/TextPageFactory.kt:85) |
+| 翻页和自动阅读 | 部分 | `page` 模式实际是固定高度容器按视口 `scrollBy`，支持键盘、横划和自动滚动；缺真实分页以及仿真／覆盖／滑动页面动画 | 当前 [翻页逻辑](E:/workspace/Java/reader-dev/web/src/components/Reader.tsx:68)；FU [ReadView 翻页模式](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/book/read/page/ReadView.kt:545) |
+| 阅读进度 | 部分 | 本设备用 localStorage 保存滚动比例，服务端保存章节；缺章内字符位置同步，跨端无法恢复精确位置 | 当前 [本地位置](E:/workspace/Java/reader-dev/web/src/components/Reader.tsx:59)、[保存 API](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/controller/BookController.kt:1933)；FU [saveRead](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/model/ReadBook.kt:967) |
+| 换源 | 部分 | 整书换源已有；缺新旧目录章节校准和单章临时换源 | 当前 [换源](E:/workspace/Java/reader-dev/web/src/components/Reader.tsx:98)；FU [整书校准](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/book/changeSource/ChangeBookSourceViewModel.kt:331)、[单章换源](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/book/changeSource/ChangeChapterSourceDialog.kt:234) |
+| 本地格式和压缩包导入 | 部分 | 实际解析 TXT、EPUB、UMD、CBZ；缺 PDF、MOBI、AZW3、AZW，以及 ZIP／RAR／7z 内书籍的批量解压导入。上传 ZIP、解压 EPUB／CBZ 或恢复备份，不等于通用压缩包导书 | 当前 [导入限制](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/controller/BookController.kt:232)、[LocalBook](E:/workspace/Java/reader-dev/src/main/java/io/legado/app/model/localBook/LocalBook.kt:39)；FU [格式与归档类型](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/constant/AppPattern.kt:43)、[LocalBook](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/model/localBook/LocalBook.kt:131) |
+| TXT 目录和 EPUB 重建目录 | 部分 | 编码检测、使用目录规则／重建目录已有；TXT 主要使用内置规则，没有 FU 用户规则库的完整 CRUD、导入导出及备份互通 | 当前 [TextFile](E:/workspace/Java/reader-dev/src/main/java/io/legado/app/model/localBook/TextFile.kt:359)、[规则 API](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/controller/BookController.kt:279)；FU [TXT 规则恢复](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/storage/Restore.kt:183) |
+| 书签、摘录和高亮 | 部分 | 选文范围、跨章字段、样式／颜色／备注、编辑和导入导出已有；未选文添加位置书签时 `chapterPos=0`。回原文主要依靠高亮 mark，普通位置书签缺字符位置恢复 | 当前 [书签创建](E:/workspace/Java/reader-dev/web/src/components/Reader.tsx:87)、[定位](E:/workspace/Java/reader-dev/web/src/components/Reader.tsx:40)；FU [位置书签](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/book/read/ReadBookActivity.kt:3144) |
+| 全文搜索 | 部分 | 后端提供章内命中索引，前端只按章节跳转；缺命中文字定位／高亮和结果逐项导航 | 当前 [全文搜索](E:/workspace/Java/reader-dev/web/src/components/Reader.tsx:103)、[搜索 API](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/controller/BookController.kt:3009)；FU [搜索结果定位](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/book/read/ReadBookActivity.kt:3086) |
+| 正文编辑 | 缺失 | 缺章节正文／标题编辑、写入缓存及恢复原文；已有的 AI 净化显示不等于持久正文编辑 | 当前 [Reader 状态](E:/workspace/Java/reader-dev/web/src/components/Reader.tsx:32)；FU [ContentEditDialog](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/book/read/ContentEditDialog.kt:208) |
+| 净化和简繁转换 | 部分，有行为问题 | 替换规则作用域、标题／正文选择、排序和超时保护已有；Web 忽略单书开关。简繁使用单字符表，无法处理词组语境；FU 使用 quick-transfer 和词组排除字典 | 当前 [reading](E:/workspace/Java/reader-dev/web/src/lib/reading.ts:22)、[chinese](E:/workspace/Java/reader-dev/web/src/lib/chinese.ts:8)；FU [转换流程](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/book/ContentProcessor.kt:179)、[ChineseUtils](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/utils/ChineseUtils.kt:29) |
+| 查词 | 缺失 | 缺选词查询、词典规则管理、查询解析和结果界面 | FU [DictViewModel](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/dict/DictViewModel.kt:16)、[DictDialog](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/dict/DictDialog.kt:117)；当前 API／React 范围未找到对应链路 |
+| 漫画／图片阅读 | 部分 | CBZ 和图片正文能显示，服务端缓存／解码已有；缺专用漫画阅读器的缩放、横向吸附、分图／横屏和滤色处理。FU 本地格式分发未见 CBZ，不反向推断两边格式完全相同 | 当前 [Reader 图片](E:/workspace/Java/reader-dev/web/src/components/Reader.tsx:86)、[图片缓存](E:/workspace/Java/reader-dev/src/main/java/io/legado/app/help/BookHelp.kt:136)；FU [ReadMangaActivity](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/book/manga/ReadMangaActivity.kt:504) |
+| 音视频书源 | 部分 | HTML audio／video、倍速、进度、续章和音频 LRC 高亮已有；视频字幕／弹幕仅显示为文本，没有时间同步轨道／弹幕。音频书播放器缺独立定时停止 | 当前 [MediaContent](E:/workspace/Java/reader-dev/web/src/components/MediaContent.tsx:12)；FU [音频定时](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/service/AudioPlayService.kt:433)、[VideoPlayer](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/gsyVideo/VideoPlayer.kt:147) |
+
+## 缓存、离线与导出
+
+| 功能 | 当前状态 | 与 FU 的差异 | 依据 |
+| --- | --- | --- | --- |
+| 服务端全书缓存 | 主要链路已有 | 并发、进度、取消、失败章节反馈、重试复用和完整性校验已有；缓存位于服务器，用户设备离线时不能直接访问 | 当前 [ChapterCache](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/service/ChapterCache.kt:45)、[BookDownload](E:/workspace/Java/reader-dev/web/src/components/BookDownload.tsx:65)；FU [CacheBookService](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/service/CacheBookService.kt:105) |
+| 浏览器设备离线 | 部分 | IndexedDB 只保存已读正文字符串；冷开仍请求目录，EPUB 保存的是资源 URL，图片／字体／媒体未完整落到设备。没有 Service Worker／PWA 应用缓存，不能保证断网冷启动 | 当前 [cache](E:/workspace/Java/reader-dev/web/src/lib/cache.ts:3)、[打开阅读页](E:/workspace/Java/reader-dev/web/src/components/Reader.tsx:48)、[缓存回退](E:/workspace/Java/reader-dev/web/src/components/Reader.tsx:57)；FU [本地读取](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/model/ReadBook.kt:667) |
+| 自动预读 | 缺失 | 缺按阅读位置自动预下载后续 N 章；手动整本缓存不能代替阅读中的预读 | 当前 [Reader 加载](E:/workspace/Java/reader-dev/web/src/components/Reader.tsx:58)；FU [预下载](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/model/ReadBook.kt:997) |
+| 缓存完成后 TXT／EPUB 导出 | 主要链路已有 | 全章完成检查、卷章层级、实际 JPEG 封面、多图／解码、交互图片过滤、用户模板和 WebP 转换已实现；缺直接导出到远程 WebDAV 的选项。本地书当前下载原文件，不做转换或重新净化导出 | 当前 [导出入口](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/controller/BookController.kt:2720)、[EPUB 内容](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/controller/BookController.kt:2886)、[EpubImages](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/service/EpubImages.kt:49)；FU [ExportBookService](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/service/ExportBookService.kt:98) |
+
+EPUB 专项修复已有独立验收记录：后端 114 项测试、前端 46 项单元测试和 34 项浏览器测试、浏览器服务 4 项测试；7 份样本经 EPUBCheck 为 0 错误、0 警告。中文且含空格的文件名样本为 0 错误、5 条文件名兼容警告。真实书 326 章正文与缓存一致，独立 EPUB 引擎可以读取。
+
+上述是前一轮验证记录，本轮未重跑。它证明当时的导出实现与样本可用，不能推导所有 FU 功能已经完成，也不能确认用户特定阅读器的唯一故障原因。详见 [EPUB 对照](E:/workspace/Java/reader-dev/docs/epub-fu-comparison.md) 和 [补齐验收](E:/workspace/Java/reader-dev/docs/epub-fu-completion-plan.md)。
+
+## AI、Skills 与 MCP
+
+| 功能 | 当前状态 | 与 FU 的差异 | 依据 |
+| --- | --- | --- | --- |
+| AI 提供商和模型设置 | 部分 | 多提供商配置、获取模型、提示词已有；请求采用 OpenAI Chat Completions 兼容协议。缺 Google／Claude 原生协议和 FU 的模型能力／推理参数配置；通过兼容网关使用这些模型是另一条路径 | 当前 [AdvancedHttp](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/service/advanced/AdvancedHttp.kt:61)、[AdvancedSettings](E:/workspace/Java/reader-dev/web/src/components/AdvancedSettings.tsx:15)；FU [提供商选择](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/ai/AiManager.kt:84)、[推理参数](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/ai/AiChatClient.kt:1123) |
+| AI 净化 | 部分 | 整章净化、缓存和恢复原文已有；缺选中段落净化、变更摘要／校验、生成可复用替换规则和更完整的批量／重试／JSON 修复 | 当前 [ReadingAssistant](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/service/advanced/ReadingAssistant.kt:44)、[ReaderAssistant](E:/workspace/Java/reader-dev/web/src/components/ReaderAssistant.tsx:16)；FU [AiPurifyHelper](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/ai/AiPurifyHelper.kt:72) |
+| 阅读助手对话 | 部分 | 流式回复、取消、持久会话、章节／选文上下文和工具授权已有；缺重新生成／分支、推理显示、上下文压缩和 token 使用展示。当前仅保留最近 30 条普通历史消息，最多执行 5 轮工具调用 | 当前 [历史截断](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/service/advanced/ReadingAssistant.kt:87)、[工具轮次](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/service/advanced/ReadingAssistant.kt:123)；FU [AiChatActivity](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/config/AiChatActivity.kt:1578)、[AiChatClient](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/ai/AiChatClient.kt:845) |
+| AI 扫书和角色卡 | 缺专用工作流 | 通用助手可以回答书籍问题，但没有 FU 的扫书档案、覆盖追踪、角色卡实体、生成／编辑／保存和关联工具。不能把提示词回答等同于这些工作流 | 当前 [助手](E:/workspace/Java/reader-dev/web/src/components/ReaderAssistant.tsx:25)、[现有工具](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/service/advanced/ReadingTools.kt:24)；FU [扫书入口](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/book/info/BookAiAssistantLauncher.kt:13)、[扫书模式](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/ai/AgentModeDefinition.kt:343)、[角色卡入口](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/book/info/BookInfoActivity.kt:802)、[角色工具](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/web/mcp/BookshelfMcpTools.kt:354) |
+| Skills | 部分，包格式不同 | 当前为 version 1 JSON 指令包和每次请求的工具授权；缺 FU 的 `SKILL.md` 包、多资源按需读取、包哈希／运行版本和 capability 授权。FU 包不能直接作为当前 JSON 包导入 | 当前 [saveSkills](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/service/advanced/ReadingAssistant.kt:21)；FU [包注册](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/ai/AiSkillPackageRegistry.kt:10)、[授权存储](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/ai/AiSkillCapabilityGrantStore.kt:10) |
+| MCP | 部分 | 当前支持 HTTP JSON-RPC 初始化、ping、工具列表和调用，共 6 个只读工具；缺 FU 的书源／书架／分组／缓存／书签／替换／TXT 目录／词典等写操作，以及 MCP resources | 当前 [ReadingTools](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/service/advanced/ReadingTools.kt:24)、[AdvancedMcp](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/service/advanced/AdvancedMcp.kt:32)；FU [McpServer](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/web/mcp/McpServer.kt:556)、[书架工具](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/web/mcp/BookshelfMcpTools.kt:68)、[设置工具](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/web/mcp/SettingsMcpTools.kt:156) |
+| Agent 记忆和恢复 | 缺失 | 当前保存消息、工具结果和状态；缺 FU 的记忆搜索／写入、不可变工具回执和中断批次恢复／重放 | 当前 [会话状态](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/service/advanced/ReadingAssistant.kt:113)；FU [AgentMemoryMcpTools](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/web/mcp/AgentMemoryMcpTools.kt:22)、[AiChatToolBatchRecovery](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/ai/AiChatToolBatchRecovery.kt:7) |
+
+当前 6 个 MCP 工具是 `bookshelf_list`、`book_sources_list`、`book_search`、`book_chapters`、`book_content` 和 `reading_stats`。现有 Skills 和助手复用这组工具，因此工具能力的差距也会影响 AI 工作流。
+
+## 听书、订阅、统计与数据互通
+
+| 功能 | 当前状态 | 与 FU 的差异 | 依据 |
+| --- | --- | --- | --- |
+| 浏览器基础听书 | 主要链路已有，平台不同 | 声音、速度、音调、暂停／继续、定时和续章已有；没有 Media Session 接入。FU 的锁屏、耳机键、音频焦点和原生后台服务需要另选 Web 方案 | 当前 [Reader 听书](E:/workspace/Java/reader-dev/web/src/components/Reader.tsx:74)；FU [BaseReadAloudService](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/service/BaseReadAloudService.kt:150) |
+| 在线 TTS 引擎 | 部分 | 当前仅 OpenAI `/audio/speech`、MP3、手动声音映射、速度和分段缓存；缺 FU SCRIPT 引擎的自定义合成、HTTP 转发、WebSocket 和动态声音列表 | 当前 [AdvancedHttp](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/service/advanced/AdvancedHttp.kt:117)、[ReadingSpeech](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/service/advanced/ReadingSpeech.kt:19)；FU [TtsEngineModels](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/tts/TtsEngineModels.kt:9)、[TtsScriptEngineClient](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/tts/TtsScriptEngineClient.kt)、[TtsWebSocketEngineClient](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/tts/TtsWebSocketEngineClient.kt) |
+| 多角色听书 | 部分 | 当前通过“角色：正文”模式或手动分段分配声音；缺 AI 分镜、对白／旁白／内心分类、场景和情绪表现，以及长期角色选角管理 | 当前 [speech](E:/workspace/Java/reader-dev/web/src/lib/speech.ts:2)、[ReadingSpeech](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/service/advanced/ReadingSpeech.kt:40)；FU [AiTtsStoryboardHelper](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/ai/AiTtsStoryboardHelper.kt:144)、[选角协调](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/tts/BookTtsCastingCoordinator.kt:1109) |
+| 在线听书连续播放 | 部分 | 当前自动播放本章分段，位置只在组件内存；缺持久续播、跨章合成和下一章预缓存。浏览器 TTS 的续章不能代替在线角色 TTS 的完整播放链路 | 当前 [ReaderAssistant 播放](E:/workspace/Java/reader-dev/web/src/components/ReaderAssistant.tsx:32)；FU [HttpReadAloudService](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/service/HttpReadAloudService.kt:178)、[ReadAloudProgress](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/tts/ReadAloudProgress.kt:50) |
+| RSS 基础订阅 | 部分，有分页问题 | 源导入／编辑／删除、分类、文章列表和正文已有；忽略实际下一页 URL，缺搜索 key、RSS 登录检查及完整重定向处理 | 当前 [Journal](E:/workspace/Java/reader-dev/web/src/components/Journal.tsx:31)、[Rss](E:/workspace/Java/reader-dev/src/main/java/io/legado/app/model/rss/Rss.kt:16)；FU [Rss](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/model/rss/Rss.kt:35)、[分页](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/rss/article/RssArticlesViewModel.kt:60) |
+| RSS 阅读管理 | 缺失 | 文章和正文只保存在组件状态；缺收藏／分组／阅读历史／离线／朗读、更多排序和 RSS 专用调试 | 当前 [Journal 状态](E:/workspace/Java/reader-dev/web/src/components/Journal.tsx:28)；FU [RssArticlesViewModel](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/rss/article/RssArticlesViewModel.kt:46)、[ReadRssViewModel](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/rss/read/ReadRssViewModel.kt:151) |
+| 阅读统计 | 部分 | 可见页面活跃时长、空闲停止、离线上传队列、跨日拆分和按书／日期汇总已有；缺 FU 记录转换、删除和管理 | 当前 [readingStats](E:/workspace/Java/reader-dev/web/src/lib/readingStats.ts:16)、[ReadingStatistics](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/service/advanced/ReadingStatistics.kt:20)；FU [ReadRecordScreen](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/about/ReadRecordScreen.kt:101) |
+| 当前格式备份和恢复 | 主要链路已有 | v2 清单、哈希／路径／大小验证及回滚已有，包含用户实体、资源、书源状态、AI／Skills／会话／统计；需要与 FU 格式兼容单独判断 | 当前 [BackupArchive](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/service/BackupArchive.kt:17)、[backupRoots](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/controller/BookController.kt:2120) |
+| FU 备份互通 | 部分 | 旧格式恢复白名单遗漏 `rssStar.json`、`sourceSub.json`、TXT 目录和词典规则等；当前 v2 使用 `data/...` 等分区，FU 顶层旧格式恢复不能直接完整读取。不能称双向无损兼容 | 当前 [legacyNames](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/service/BackupArchive.kt:17)；FU [Backup](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/storage/Backup.kt:67)、[Restore](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/storage/Restore.kt:171) |
+| WebDAV 和自动备份 | 部分 | 当前提供 WebDAV 服务、文件管理、手动备份／恢复及 FU 进度文件；缺配置远程 WebDAV 地址后主动同步的客户端流程和按日自动备份。还有进度目录建立、冲突处理及章内位置问题 | 当前 [Settings](E:/workspace/Java/reader-dev/web/src/components/Settings.tsx:20)、[WebdavController](E:/workspace/Java/reader-dev/src/main/java/com/htmake/reader/api/controller/WebdavController.kt:352)；FU [autoBack](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/storage/Backup.kt:109)、[AppWebDav](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/AppWebDav.kt:242) |
+
+## 外观与平台差异
+
+| 功能 | 当前状态 | 与 FU 的差异 | 依据 |
+| --- | --- | --- | --- |
+| 阅读外观 | 部分 | 字号、行高、段距、字重、宽度、主题、上传字体／背景和方案导入导出已有；缺字间距、缩进、独立标题样式、页眉页脚及更细的边距参数 | 当前 [ReadingAppearance](E:/workspace/Java/reader-dev/web/src/components/ReadingAppearance.tsx:10)、[ReadingSettings](E:/workspace/Java/reader-dev/web/src/types.ts:14)；FU [ReadBookConfig](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/config/ReadBookConfig.kt:509) |
+| 全应用主题和主题包 | 部分 | 当前有 4 种阅读主题、自定义资源和阅读方案；缺 FU 全应用 NG 主题库、主题包和动态场景引擎。阅读方案 JSON 不等于 FU 主题包 | 当前 [appearance](E:/workspace/Java/reader-dev/web/src/lib/appearance.ts:6)；FU [NgThemePackageManager](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/help/config/NgThemePackageManager.kt:88)、[ThemeManagerFragment](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/config/ThemeManagerFragment.kt:154) |
+| 架构和终端 | 平台不同 | 当前是独立 React 网页、Java API 和浏览器执行服务，采用 shadcn/ui；FU 是 Android 原生应用加内部 Web 服务。页面组织应适合 Web，不能直接复制 Android 控件和导航 | 当前 [迁移验收](E:/workspace/Java/reader-dev/docs/verification.md)；FU [AndroidManifest](E:/workspace/Java/legado_FU/app/src/main/AndroidManifest.xml) |
+| 系统集成 | 平台差异 | FU 的分享接收、文件关联、快捷设置磁贴、媒体按键和前台服务没有对应 Web 接入；需要分别评估 Web Share、文件处理、Media Session 和 PWA 能力，浏览器支持不一致 | FU [分享接收](E:/workspace/Java/legado_FU/app/src/main/AndroidManifest.xml:367)、[磁贴和服务](E:/workspace/Java/legado_FU/app/src/main/AndroidManifest.xml:519)、[媒体按键](E:/workspace/Java/legado_FU/app/src/main/AndroidManifest.xml:547) |
+| 设备阅读控制 | 平台差异 | Android 音量键翻页、窗口亮度和硬件电子纸刷新不能直接移植；屏幕常亮可考虑 Web Wake Lock。当前未找到 Wake Lock 接入 | FU [ReadBookActivity](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/book/read/ReadBookActivity.kt:762)、[BaseReadBookActivity](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/book/read/BaseReadBookActivity.kt:232)、[漫画电子纸](E:/workspace/Java/legado_FU/app/src/main/java/io/legado/app/ui/book/manga/ReadMangaActivity.kt:807) |
+
+查词、精确定位、完整离线、角色卡和书源兼容都是可移植的业务差距，不应全部归为 Android 平台限制。后台播放和硬件控制则需要明确浏览器能力边界。
+
+## 建议补齐次序与验收要求
+
+| 次序 | 范围 | 可验证的完成标准 |
+| --- | --- | --- |
+| 1 | 修复现有行为 | 单书关闭净化后阅读／导出一致；RSS 使用真实下一页 URL；旧进度不会未经判断覆盖新进度；阅读图片解码能收到章节上下文；导入 FU 记录后统计可见 |
+| 2 | 书源兼容 | 接入 `preUpdateJs`、正文及错误响应 `loginCheckJs`、顺序分页 webJs、`@webjs:` 和传统动态登录表单；校验覆盖搜索、发现、详情、目录和正文；调试取消真正停止任务 |
+| 3 | 阅读定位与离线 | 换源按目录校准；章内进度、普通书签和搜索命中按字符定位；预读可配置；关闭网络后冷启动仍可打开目录、正文和已缓存资源 |
+| 4 | 本地书与阅读器 | 补格式和压缩包导入；明确 PDF 等格式的显示方案；补正文编辑、查词、真实分页及专用漫画操作 |
+| 5 | AI 和听书 | 补提供商协议、Skills 包及授权、所需 MCP 写工具、记忆／恢复、扫书和角色卡；在线朗读能跨章、预缓存及持久续播 |
+| 6 | 数据互通和外观 | FU 备份条目逐项转换并做双向验证；补远程 WebDAV 客户端和自动备份；再完善主题包、排版及可行的系统集成 |
+
+这些是审计后的建议，不是本轮已实施的内容。若只按按钮或字段验收，仍会漏掉规则执行、持久化、跨端位置和离线冷启动等问题。
+
+## 验证边界
+
+本轮完成源码对照和文档引用检查，未重新运行应用测试、构建或外部服务联测。FU 仓库只读，原有工作区改动和用户数据保持原状。旧 [迁移验收](E:/workspace/Java/reader-dev/docs/verification.md) 记录的是当时实施范围的验证；完整功能差距以本报告为准。
+
+没有应用代码简化或新增依赖。剩余限制是：源码中存在调用链并不保证第三方服务实际兼容；未运行的 FU Android 行为、实验性 QuickJS 和未启用的段评，应保留各自边界，不能混同为成熟能力或已完成的迁移。

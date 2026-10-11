@@ -1,13 +1,6 @@
-spring:
-  profiles:
-    active: prod
-
 reader:
   app:
     storagePath: 'storage'
-    showUI: false
-    debug: false
-    packaged: false
     secure: false
     inviteCode: ""
     secureKey: ""
@@ -25,7 +18,7 @@ reader:
 
   server:
     port: 8080
-    webUrl: http://localhost:${reader.server.port}
 
 logging:
-  path: "./logs"
+  file:
+    path: "./logs"

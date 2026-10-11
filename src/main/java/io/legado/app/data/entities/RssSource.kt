@@ -9,7 +9,7 @@ import io.legado.app.constant.AppConst
 import javax.script.SimpleBindings
 import io.legado.app.utils.*
 
-@JsonIgnoreProperties("headerMap", "source")
+@JsonIgnoreProperties("headerMap", "source", "scriptCache", "storageNamespace", "userNamespace")
 data class RssSource(
     var sourceUrl: String = "",
     var sourceName: String = "",
@@ -40,6 +40,15 @@ data class RssSource(
     var loadWithBaseUrl: Boolean = true,
     var customOrder: Int = 0
 ): BaseSource {
+
+    @field:com.fasterxml.jackson.annotation.JsonIgnore
+    @Transient private var userNamespace: String = "default"
+    fun setUserNamespace(user: String) { userNamespace = user }
+    override fun getUserNamespace(): String = userNamespace
+    override fun getStorageNamespace(): String = io.legado.app.help.source.SourceStorage.namespace(userNamespace, "rss:" + getKey())
+    override var enabledCookieJar: Boolean?
+        get() = true
+        set(value) {}
 
     override fun getTag(): String {
         return sourceName

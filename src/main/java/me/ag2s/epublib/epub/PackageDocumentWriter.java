@@ -171,7 +171,7 @@ public class PackageDocumentWriter extends PackageDocumentBase {
         serializer.attribute(EpubWriter.EMPTY_NAMESPACE_PREFIX, OPFAttributes.id,
                 resource.getId());
         serializer.attribute(EpubWriter.EMPTY_NAMESPACE_PREFIX, OPFAttributes.href,
-                resource.getHref());
+                StringUtil.encodeHref(resource.getHref()));
         serializer
                 .attribute(EpubWriter.EMPTY_NAMESPACE_PREFIX, OPFAttributes.media_type,
                         resource.getMediaType().getName());
@@ -205,6 +205,9 @@ public class PackageDocumentWriter extends PackageDocumentBase {
     private static void writeGuide(EpubBook book, EpubWriter epubWriter,
                                    XmlSerializer serializer)
             throws IllegalArgumentException, IllegalStateException, IOException {
+        if (book.getGuide().getReferences().isEmpty() && book.getGuide().getCoverPage() == null) {
+            return;
+        }
         serializer.startTag(NAMESPACE_OPF, OPFTags.guide);
         ensureCoverPageGuideReferenceWritten(book.getGuide(), epubWriter,
                 serializer);
@@ -240,7 +243,7 @@ public class PackageDocumentWriter extends PackageDocumentBase {
         serializer.attribute(EpubWriter.EMPTY_NAMESPACE_PREFIX, OPFAttributes.type,
                 reference.getType());
         serializer.attribute(EpubWriter.EMPTY_NAMESPACE_PREFIX, OPFAttributes.href,
-                reference.getCompleteHref());
+                StringUtil.encodeHref(reference.getResource().getHref(), reference.getFragmentId()));
         if (StringUtil.isNotBlank(reference.getTitle())) {
             serializer
                     .attribute(EpubWriter.EMPTY_NAMESPACE_PREFIX, OPFAttributes.title,

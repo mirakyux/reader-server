@@ -1,8 +1,12 @@
 package me.ag2s.epublib.util;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.regex.Pattern;
+import org.jsoup.Jsoup;
 
 /**
  * Various String utility functions.
@@ -15,6 +19,19 @@ import java.util.List;
  * @author paul.siegmann
  */
 public class StringUtil {
+
+    /** Encode a raw ZIP resource path as a URI without changing the ZIP name. */
+    public static String encodeHref(String href) {
+        if (href == null) return null;
+        return URLEncoder.encode(href, StandardCharsets.UTF_8)
+                .replace("+", "%20").replace("%2F", "/");
+    }
+
+    /** A fragment is URI syntax; it is not part of the raw archive path. */
+    public static String encodeHref(String href, String fragmentId) {
+        String path = encodeHref(href);
+        return isBlank(fragmentId) ? path : path + "#" + encodeHref(fragmentId);
+    }
 
     /**
      * Changes a path containing '..', '.' and empty dirs into a path that
@@ -272,18 +289,33 @@ public class StringUtil {
         return text.substring(cPos + 1);
     }
 
+    public static String escapeXml(String text) {
+        return defaultIfNull(text).replaceAll("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F]", "")
+                .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                .replace("\"", "&quot;").replace("'", "&apos;");
+    }
+
     public static String formatHtml(String text) {
         StringBuilder body = new StringBuilder();
-        for (String s : text.split("\\r?\\n")) {
+        Pattern images = Pattern.compile("<img\\b[^>]*>", Pattern.CASE_INSENSITIVE);
+        for (String s : defaultIfNull(text).split("\\r?\\n")) {
             s = s.replaceAll("^\\s+|\\s+$", "");
             if (s.length() > 0) {
-                //段落为一张图片才认定为图片章节/漫画并启用多看单图优化，否则认定为普通文字夹杂着的图片文字。
-                if (s.matches("(?i)^<img\\s([^>]+)/?>$")) {
-                    body.append(s.replaceAll("(?i)^<img\\s([^>]+)/?>$",
-                            "<div class=\"duokan-image-single\"><img class=\"picture-80\" $1/></div>"));
-                } else {
-                    body.append("<p>").append(s).append("</p>");
+                boolean singleImage = images.matcher(s).matches();
+                body.append(singleImage ? "<div class=\"duokan-image-single\">" : "<p>");
+                var matcher = images.matcher(s);
+                int position = 0;
+                while (matcher.find()) {
+                    body.append(escapeXml(s.substring(position, matcher.start())));
+                    var image = Jsoup.parseBodyFragment(matcher.group()).selectFirst("img");
+                    if (image != null) {
+                        body.append("<img src=\"").append(escapeXml(image.attr("src")))
+                                .append("\" alt=\"").append(escapeXml(image.attr("alt"))).append("\" />");
+                    }
+                    position = matcher.end();
                 }
+                body.append(escapeXml(s.substring(position)));
+                body.append(singleImage ? "</div>" : "</p>");
             }
         }
         return body.toString();

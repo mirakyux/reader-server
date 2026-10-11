@@ -1,6 +1,6 @@
 package io.legado.app.model.analyzeRule
 
-import com.script.SimpleBindings
+import javax.script.SimpleBindings
 import io.legado.app.constant.AppConst.SCRIPT_ENGINE
 import io.legado.app.constant.AppPattern.JS_PATTERN
 import io.legado.app.data.entities.BaseBook
@@ -19,7 +19,7 @@ import java.net.URL
 import java.util.*
 import java.util.regex.Pattern
 import kotlin.collections.HashMap
-import mu.KotlinLogging
+import io.github.oshai.kotlinlogging.KotlinLogging
 import io.legado.app.model.analyzeRule.RuleDataInterface
 import io.legado.app.model.webBook.WebBook
 
@@ -29,9 +29,11 @@ private val logger = KotlinLogging.logger {}
  * 解析规则获取结果
  */
 @Suppress("unused", "RegExpRedundantEscape")
-class AnalyzeRule(
-    var ruleData: RuleDataInterface,
-    private val source: BaseSource? = null
+class AnalyzeRule @JvmOverloads constructor(
+    var ruleData: RuleDataInterface? = null,
+    private val source: BaseSource? = null,
+    private val preUpdateJs: Boolean = false,
+    private var isFromBookInfo: Boolean = false
 ) : JsExtensions {
 
     val book get() = ruleData as? BaseBook
@@ -138,6 +140,13 @@ class AnalyzeRule(
         return getStringList(ruleList, mContent, isUrl)
     }
 
+    private fun getWebJsResult(script: String, result: Any): String {
+        val address = redirectUrl?.toString() ?: baseUrl ?: getSource()?.getKey()
+        // Browser eval runs in the page DOM; preserve the prior rule result as a JS value.
+        return io.legado.app.help.source.BrowserBridge.execute(getSource(), content.toString(), address,
+            "var result = " + GSON.toJson(result) + ";\n" + script, cacheFirst = true).orEmpty()
+    }
+
     @JvmOverloads
     fun getStringList(
         ruleList: List<SourceRule>,
@@ -158,6 +167,7 @@ class AnalyzeRule(
                         if (sourceRule.rule.isNotEmpty()) {
                             result = when (sourceRule.mode) {
                                 Mode.Js -> evalJS(sourceRule.rule, result)
+                                Mode.WebJs -> getWebJsResult(sourceRule.rule, it)
                                 Mode.Json -> getAnalyzeByJSonPath(it).getStringList(sourceRule.rule)
                                 Mode.XPath -> getAnalyzeByXPath(it).getStringList(sourceRule.rule)
                                 Mode.Default -> getAnalyzeByJSoup(it).getStringList(sourceRule.rule)
@@ -227,6 +237,7 @@ class AnalyzeRule(
                         if (sourceRule.rule.isNotBlank() || sourceRule.replaceRegex.isEmpty()) {
                             result = when (sourceRule.mode) {
                                 Mode.Js -> evalJS(sourceRule.rule, it)
+                                Mode.WebJs -> getWebJsResult(sourceRule.rule, it)
                                 Mode.Json -> getAnalyzeByJSonPath(it).getString(sourceRule.rule)
                                 Mode.XPath -> getAnalyzeByXPath(it).getString(sourceRule.rule)
                                 Mode.Default -> if (isUrl) {
@@ -282,6 +293,7 @@ class AnalyzeRule(
                             sourceRule.rule.splitNotBlank("&&")
                         )
                         Mode.Js -> evalJS(sourceRule.rule, it)
+                        Mode.WebJs -> getWebJsResult(sourceRule.rule, it)
                         Mode.Json -> getAnalyzeByJSonPath(it).getObject(sourceRule.rule)
                         Mode.XPath -> getAnalyzeByXPath(it).getElements(sourceRule.rule)
                         else -> getAnalyzeByJSoup(it).getElements(sourceRule.rule)
@@ -314,6 +326,7 @@ class AnalyzeRule(
                             sourceRule.rule.splitNotBlank("&&")
                         )
                         Mode.Js -> evalJS(sourceRule.rule, result)
+                        Mode.WebJs -> getWebJsResult(sourceRule.rule, it)
                         Mode.Json -> getAnalyzeByJSonPath(it).getList(sourceRule.rule)
                         Mode.XPath -> getAnalyzeByXPath(it).getElements(sourceRule.rule)
                         else -> getAnalyzeByJSoup(it).getElements(sourceRule.rule)
@@ -372,7 +385,7 @@ class AnalyzeRule(
                     ""
                 }
             }.getOrElse {
-                vResult.replaceFirst(rule.replaceRegex, rule.replacement)
+                rule.replacement
             }
         } else {
             kotlin.runCatching {
@@ -389,6 +402,9 @@ class AnalyzeRule(
      */
     fun splitSourceRule(ruleStr: String?, allInOne: Boolean = false): List<SourceRule> {
         if (ruleStr.isNullOrEmpty()) return emptyList()
+        val webIndex = ruleStr.indexOf("@webjs:", ignoreCase = true)
+        if (webIndex >= 0) return splitSourceRule(ruleStr.substring(0, webIndex), allInOne) +
+            SourceRule(ruleStr.substring(webIndex + 7), Mode.WebJs)
         val ruleList = ArrayList<SourceRule>()
         var mMode: Mode = Mode.Default
         var start = 0
@@ -443,7 +459,7 @@ class AnalyzeRule(
 
         init {
             rule = when {
-                mode == Mode.Js || mode == Mode.Regex -> ruleStr
+                mode == Mode.Js || mode == Mode.WebJs || mode == Mode.Regex -> ruleStr
                 ruleStr.startsWith("@CSS:", true) -> {
                     mode = Mode.Default
                     ruleStr
@@ -479,7 +495,7 @@ class AnalyzeRule(
 
             if (evalMatcher.find()) {
                 tmp = rule.substring(start, evalMatcher.start())
-                if (mode != Mode.Js && mode != Mode.Regex &&
+                if (mode != Mode.Js && mode != Mode.WebJs && mode != Mode.Regex &&
                     (evalMatcher.start() == 0 || !tmp.contains("##"))
                 ) {
                     mode = Mode.Regex
@@ -522,7 +538,7 @@ class AnalyzeRule(
             val regexMatcher = regexPattern.matcher(ruleStrArray[0])
 
             if (regexMatcher.find()) {
-                if (mode != Mode.Js && mode != Mode.Regex) {
+                if (mode != Mode.Js && mode != Mode.WebJs && mode != Mode.Regex) {
                     mode = Mode.Regex
                 }
                 do {
@@ -613,13 +629,14 @@ class AnalyzeRule(
     }
 
     enum class Mode {
-        XPath, Json, Default, Js, Regex
+        XPath, Json, Default, Js, WebJs, Regex
     }
 
     fun put(key: String, value: String): String {
         chapter?.putVariable(key, value)
             ?: book?.putVariable(key, value)
-            ?: ruleData.putVariable(key, value)
+            ?: ruleData?.putVariable(key, value)
+            ?: source?.put(key, value)
         return value
     }
 
@@ -632,9 +649,10 @@ class AnalyzeRule(
                 return it.title
             }
         }
-        return chapter?.getVariable(key)
-            ?: book?.getVariable(key)
-            ?: ruleData?.getVariable(key)
+        return chapter?.getVariable(key)?.takeIf { it.isNotEmpty() }
+            ?: book?.getVariable(key)?.takeIf { it.isNotEmpty() }
+            ?: ruleData?.getVariable(key)?.takeIf { it.isNotEmpty() }
+            ?: source?.get(key)?.takeIf { it.isNotEmpty() }
             ?: ""
     }
 
@@ -644,8 +662,8 @@ class AnalyzeRule(
     fun evalJS(jsStr: String, result: Any?): Any? {
         val bindings = SimpleBindings()
         bindings["java"] = this
-        bindings["cookie"] = CookieStore
-        bindings["cache"] = CacheManager
+        bindings["cookie"] = CookieStore.forSource(source)
+        bindings["cache"] = source?.getScriptCache() ?: CacheManager
         bindings["source"] = source
         bindings["book"] = book
         bindings["result"] = result
@@ -654,7 +672,8 @@ class AnalyzeRule(
         bindings["title"] = chapter?.title
         bindings["src"] = content
         bindings["nextChapterUrl"] = nextChapterUrl
-        return SCRIPT_ENGINE.eval(jsStr, bindings)
+        bindings["fromBookInfo"] = isFromBookInfo
+        return if (source != null) source!!.evalScript(jsStr, bindings) else SCRIPT_ENGINE.eval(jsStr, bindings)
     }
 
     override fun getSource(): BaseSource? {
@@ -681,7 +700,7 @@ class AnalyzeRule(
     /**
      * 章节数转数字
      */
-    fun toNumChapter(s: String?): String? {
+    override fun toNumChapter(s: String?): String? {
         s ?: return null
         val matcher = titleNumPattern.matcher(s)
         if (matcher.find()) {
@@ -698,7 +717,7 @@ class AnalyzeRule(
             val bookSource = source as? BookSource
             val book = book as? Book
             if (bookSource == null || book == null) return@runBlocking
-            val books = WebBook(bookSource).searchBook(book.name)
+            val books = WebBook(bookSource, userNameSpace = bookSource.getUserNamespace()).searchBook(book.name)
             books.forEach {
                 if (it.name == book.name && it.author == book.author) {
                     book.bookUrl = it.bookUrl
@@ -711,6 +730,35 @@ class AnalyzeRule(
         }
     }
 
+    /** FU exposes a full search-and-detail refresh only to directory preprocessing. */
+    fun reGetBook() {
+        check(preUpdateJs) { "只能在 preUpdateJs 中调用" }
+        val bookSource = source as? BookSource ?: return
+        val current = book as? Book ?: return
+        runBlocking {
+            kotlinx.coroutines.withTimeout(30_000) {
+                val web = WebBook(bookSource, userNameSpace = bookSource.getUserNamespace())
+                val found = web.searchBook(current.name).firstOrNull { it.name == current.name && it.author == current.author }
+                    ?: error("未找到同名同作者的书籍")
+                current.bookUrl = found.bookUrl
+                found.variableMap.forEach { (key, value) -> current.putVariable(key, value) }
+                current.infoHtml = null
+                current.tocHtml = null
+                val refreshed = web.getBookInfo(current, false)
+                current.tocUrl = refreshed.tocUrl
+                current.kind = refreshed.kind
+                current.coverUrl = refreshed.coverUrl
+                current.intro = refreshed.intro
+                current.wordCount = refreshed.wordCount
+                current.latestChapterTitle = refreshed.latestChapterTitle
+                current.downloadUrls = refreshed.downloadUrls
+                current.infoHtml = refreshed.infoHtml
+                current.tocHtml = refreshed.tocHtml
+                refreshed.variableMap.forEach { (key, value) -> current.putVariable(key, value) }
+            }
+        }
+    }
+
     /**
      * 更新tocUrl,有些书源目录url定期更新,可以在js调用更新
      */
@@ -719,7 +767,9 @@ class AnalyzeRule(
             val bookSource = source as? BookSource
             val book = book as? Book
             if (bookSource == null || book == null) return@runBlocking
-            WebBook(bookSource).getBookInfo(book)
+            val refreshed = WebBook(bookSource, userNameSpace = bookSource.getUserNamespace()).getBookInfo(book, false)
+            book.tocUrl = refreshed.tocUrl
+            book.tocHtml = refreshed.tocHtml
         }
     }
 

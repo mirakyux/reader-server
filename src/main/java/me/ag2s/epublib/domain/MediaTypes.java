@@ -28,6 +28,7 @@ public class MediaTypes {
       new String[]{".jpg", ".jpeg"});
   public static final MediaType PNG = new MediaType("image/png", ".png");
   public static final MediaType GIF = new MediaType("image/gif", ".gif");
+  public static final MediaType WEBP = new MediaType("image/webp", ".webp");
 
   public static final MediaType SVG = new MediaType("image/svg+xml", ".svg");
 
@@ -38,6 +39,7 @@ public class MediaTypes {
       "application/vnd.ms-opentype", ".otf");
   public static final MediaType WOFF = new MediaType("application/font-woff",
       ".woff");
+  public static final MediaType WOFF2 = new MediaType("font/woff2", ".woff2");
 
   // audio
   public static final MediaType MP3 = new MediaType("audio/mpeg", ".mp3");
@@ -54,7 +56,7 @@ public class MediaTypes {
       ".pls");
 
   public static final MediaType[] mediaTypes = new MediaType[]{
-      XHTML, EPUB, JPG, PNG, GIF, CSS, SVG, TTF, NCX, XPGT, OPENTYPE, WOFF,
+      XHTML, EPUB, JPG, PNG, GIF, WEBP, CSS, SVG, TTF, NCX, XPGT, OPENTYPE, WOFF, WOFF2,
       SMIL, PLS, JAVASCRIPT, MP3, MP4, OGG
   };
 
@@ -67,7 +69,7 @@ public class MediaTypes {
   }
 
   public static boolean isBitmapImage(MediaType mediaType) {
-    return mediaType == JPG || mediaType == PNG || mediaType == GIF;
+    return mediaType == JPG || mediaType == PNG || mediaType == GIF || mediaType == WEBP;
   }
 
   /**

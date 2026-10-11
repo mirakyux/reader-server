@@ -1,14 +1,11 @@
 package com.htmake.reader
 
-import com.fasterxml.jackson.databind.DeserializationFeature
-import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import io.vertx.core.Future
 import io.vertx.core.Vertx
 import io.vertx.core.http.*
-import io.vertx.core.json.Json
 import io.vertx.ext.web.client.WebClient
 import io.vertx.ext.web.client.WebClientOptions
-import mu.KotlinLogging
+import io.github.oshai.kotlinlogging.KotlinLogging
 import com.htmake.reader.api.YueduApi
 
 import com.htmake.reader.verticle.RestVerticle
@@ -17,7 +14,8 @@ import org.springframework.boot.SpringApplication
 import org.springframework.boot.autoconfigure.SpringBootApplication
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.context.annotation.Bean
-import javax.annotation.PostConstruct
+import jakarta.annotation.PostConstruct
+import jakarta.annotation.PreDestroy
 
 private val logger = KotlinLogging.logger {}
 
@@ -35,23 +33,18 @@ class ReaderApplication {
 
     @PostConstruct
     fun deployVerticle() {
-        Json.mapper.apply {
-            registerKotlinModule()
-        }
-
-        Json.prettyMapper.apply {
-            registerKotlinModule()
-        }
-
-        Json.mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
-
         vertx().deployVerticle(yueduApi)
+    }
+
+    @PreDestroy
+    fun closeVertx() {
+        vertx().close().toCompletionStage().toCompletableFuture().join()
     }
 
     @Bean
     fun webClient(): WebClient {
         val webClientOptions = WebClientOptions()
-        webClientOptions.isTryUseCompression = true
+        webClientOptions.isDecompressionSupported = true
         webClientOptions.logActivity = true
         webClientOptions.isFollowRedirects = true
         webClientOptions.isTrustAll = true

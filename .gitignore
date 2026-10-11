@@ -1,5 +1,6 @@
 HELP.md
 .gradle
+.kotlin/
 build/
 !gradle/wrapper/gradle-wrapper.jar
 !**/src/main/**
@@ -40,10 +41,13 @@ out
 /src/main/resources/web
 /storage*
 /logs
+/.env
 /bin
 /file-uploads
 /reader-assets
 /.lh/
+/.omx/
+/screenshots/
 
 /simple-web/
 

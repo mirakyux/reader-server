@@ -12,7 +12,7 @@ import io.vertx.ext.web.Route
 import io.vertx.ext.web.Router
 import io.vertx.ext.web.RoutingContext
 import io.vertx.ext.web.handler.StaticHandler;
-import mu.KotlinLogging
+import io.github.oshai.kotlinlogging.KotlinLogging
 import com.htmake.reader.config.AppConfig
 import com.htmake.reader.config.BookConfig
 import io.legado.app.constant.DeepinkBookSource
@@ -36,7 +36,6 @@ import com.htmake.reader.utils.zip
 import com.htmake.reader.utils.jsonEncode
 import com.htmake.reader.utils.getRelativePath
 import com.htmake.reader.verticle.RestVerticle
-import com.htmake.reader.SpringEvent
 import org.springframework.stereotype.Component
 import io.vertx.core.json.JsonObject
 import io.vertx.core.json.JsonArray
@@ -90,7 +89,7 @@ class RssSourceController(coroutineContext: CoroutineContext): BaseController(co
         if (!checkAuth(context)) {
             return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
         }
-        val rssSource = context.bodyAsJson.mapTo(RssSource::class.java)
+        val rssSource = context.body().asJsonObject().mapTo(RssSource::class.java)
         if (rssSource.sourceUrl.isEmpty()) {
             return returnData.setErrorMsg("RSS链接不能为空")
         }
@@ -131,7 +130,7 @@ class RssSourceController(coroutineContext: CoroutineContext): BaseController(co
         if (!checkAuth(context)) {
             return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
         }
-        val rssSourceJsonArray = context.bodyAsJsonArray
+        val rssSourceJsonArray = context.body().asJsonArray()
         if (rssSourceJsonArray == null) {
             return returnData.setErrorMsg("参数错误")
         }
@@ -178,7 +177,7 @@ class RssSourceController(coroutineContext: CoroutineContext): BaseController(co
         if (!checkAuth(context)) {
             return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
         }
-        val rssSource = context.bodyAsJson.mapTo(RssSource::class.java)
+        val rssSource = context.body().asJsonObject().mapTo(RssSource::class.java)
         var userNameSpace = getUserNameSpace(context)
         var rssSourceList: JsonArray? = asJsonArray(getUserStorage(userNameSpace, "rssSources"))
         if (rssSourceList == null) {
@@ -212,6 +211,7 @@ class RssSourceController(coroutineContext: CoroutineContext): BaseController(co
         for (i in 0 until list.size()) {
             var _rssSource = list.getJsonObject(i).mapTo(RssSource::class.java)
             if (_rssSource.sourceUrl.equals(url)) {
+                _rssSource.setUserNamespace(userNameSpace)
                 return _rssSource
             }
         }
@@ -229,10 +229,10 @@ class RssSourceController(coroutineContext: CoroutineContext): BaseController(co
         var page: Int
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            sourceUrl = context.bodyAsJson.getString("sourceUrl")
-            sortName = context.bodyAsJson.getString("sortName", "")
-            sortUrl = context.bodyAsJson.getString("sortUrl", "")
-            page = context.bodyAsJson.getInteger("page", 1)
+            sourceUrl = context.body().asJsonObject().getString("sourceUrl")
+            sortName = context.body().asJsonObject().getString("sortName", "")
+            sortUrl = context.body().asJsonObject().getString("sortUrl", "")
+            page = context.body().asJsonObject().getInteger("page", 1)
         } else {
             // get 请求
             sourceUrl = context.queryParam("sourceUrl").firstOrNull() ?: ""
@@ -253,7 +253,8 @@ class RssSourceController(coroutineContext: CoroutineContext): BaseController(co
             return returnData.setErrorMsg("RSS源不存在")
         }
 
-        val rssArtcles = Rss.getArticles(sortName, sortUrl, rssSource, page, Debug)
+        val key = if (context.request().method() == HttpMethod.POST) context.body().asJsonObject().getString("key") else context.queryParam("key").firstOrNull()
+        val rssArtcles = Rss.getArticles(sortName, sortUrl, rssSource, page.coerceAtLeast(1), Debug, key)
 
         return returnData.setData(rssArtcles)
     }
@@ -268,9 +269,9 @@ class RssSourceController(coroutineContext: CoroutineContext): BaseController(co
         var origin: String
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            sourceUrl = context.bodyAsJson.getString("sourceUrl")
-            link = context.bodyAsJson.getString("link")
-            origin = context.bodyAsJson.getString("origin")
+            sourceUrl = context.body().asJsonObject().getString("sourceUrl")
+            link = context.body().asJsonObject().getString("link")
+            origin = context.body().asJsonObject().getString("origin")
         } else {
             // get 请求
             sourceUrl = context.queryParam("sourceUrl").firstOrNull() ?: ""
@@ -292,10 +293,13 @@ class RssSourceController(coroutineContext: CoroutineContext): BaseController(co
         if (rssSource == null) {
             return returnData.setErrorMsg("RSS源不存在")
         }
-        val rssArticle = RssArticle(origin = origin, link = link)
+        val rssArticle = if (context.request().method() == HttpMethod.POST) context.body().asJsonObject().getJsonObject("article")?.let { io.legado.app.utils.GSON.fromJson(it.encode(), RssArticle::class.java) } else null
+        val currentArticle = (rssArticle ?: RssArticle(origin = origin, link = link)).apply { this.origin = origin; this.link = link }
         var content = ""
-        if (rssSource.ruleContent != null) {
-            content = Rss.getContent(rssArticle, rssSource.ruleContent as String, rssSource, Debug)
+        if (!rssSource.ruleContent.isNullOrBlank() || rssSource.singleUrl) {
+            content = Rss.getContent(currentArticle, rssSource.ruleContent?.takeIf { it.isNotBlank() } ?: "@css:body@html", rssSource, Debug)
+        } else {
+            content = currentArticle.content ?: currentArticle.description.orEmpty()
         }
 
         return returnData.setData(content)

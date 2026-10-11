@@ -14,6 +14,9 @@ data class BookChapter(
         var url: String = "",               // 章节地址
         var title: String = "",              // 章节标题
         var isVolume: Boolean = false,      // 是否是卷名
+        var isVip: Boolean = false,
+        var isPay: Boolean = false,
+        var subContent: String? = null,
         var baseUrl: String = "",           //用来拼接相对url
         var bookUrl: String = "",           // 书籍地址
         var index: Int = 0,                 // 章节序号
@@ -25,6 +28,9 @@ data class BookChapter(
         var endFragmentId: String? = null,    //EPUB书籍下一章节的fragmentId
         var variable: String? = null        //变量
 ): RuleDataInterface {
+
+    fun putLyric(value: String?) { subContent = value; putVariable("lyric", value) }
+    fun putDanmaku(value: String?) { subContent = value; putVariable("danmaku", value) }
 
     @delegate:Transient
     override val variableMap: HashMap<String, String> by lazy {

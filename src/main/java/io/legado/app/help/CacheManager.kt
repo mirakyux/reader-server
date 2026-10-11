@@ -16,20 +16,19 @@ object CacheManager {
     @JvmOverloads
     fun put(key: String, value: Any, saveTime: Int = 0) {
         val deadline =
-            if (saveTime == 0) 0 else System.currentTimeMillis() + saveTime * 1000
+            if (saveTime == 0) 0 else System.currentTimeMillis() + saveTime * 1000L
         when (value) {
             is QueryTTF -> queryTTFMap[key] = Pair(deadline, value)
-            is ByteArray -> ACache.get().put(key, value, saveTime)
+            is ByteArray -> if (saveTime > 0) ACache.get().put(key, value, saveTime) else ACache.get().put(key, value)
             else -> {
-                val cache = Cache(key, value.toString(), deadline)
-                // appDb.cacheDao.insert(cache)
+                if (saveTime > 0) ACache.get().put(key, value.toString(), saveTime)
+                else ACache.get().put(key, value.toString())
             }
         }
     }
 
     fun get(key: String): String? {
-        // return appDb.cacheDao.get(key, System.currentTimeMillis())
-        return null
+        return ACache.get().getAsString(key)
     }
 
     fun getInt(key: String): Int? {
@@ -61,7 +60,8 @@ object CacheManager {
     }
 
     fun putFile(key: String, value: String, saveTime: Int = 0) {
-        ACache.get().put(key, value, saveTime)
+        if (saveTime > 0) ACache.get().put(key, value, saveTime)
+        else ACache.get().put(key, value)
     }
 
     fun getFile(key: String): String? {
@@ -69,6 +69,7 @@ object CacheManager {
     }
 
     fun delete(key: String) {
+        queryTTFMap.remove(key)
         ACache.get().remove(key)
     }
 }

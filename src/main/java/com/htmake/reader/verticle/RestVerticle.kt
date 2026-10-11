@@ -6,22 +6,26 @@ import io.vertx.ext.web.Router
 import io.vertx.ext.web.RoutingContext
 import io.vertx.ext.web.handler.BodyHandler
 import io.vertx.ext.web.handler.CorsHandler
-import io.vertx.ext.web.handler.LoggerFormat
-import io.vertx.ext.web.handler.LoggerHandler
 import io.vertx.ext.web.handler.SessionHandler
 import io.vertx.ext.web.sstore.LocalSessionStore
 import io.vertx.kotlin.coroutines.CoroutineVerticle
+import io.vertx.kotlin.coroutines.coAwait
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import mu.KotlinLogging
+import kotlinx.coroutines.CancellationException
+import io.github.oshai.kotlinlogging.KotlinLogging
 import com.htmake.reader.utils.error
 import com.htmake.reader.utils.success
-import java.net.URLDecoder
+import com.htmake.reader.config.CorsConfig
+import org.springframework.beans.factory.annotation.Autowired
 
 
 private val logger = KotlinLogging.logger {}
 
 abstract class RestVerticle : CoroutineVerticle() {
+
+    @Autowired
+    private lateinit var corsConfig: CorsConfig
 
     protected lateinit var router: Router
 
@@ -30,6 +34,15 @@ abstract class RestVerticle : CoroutineVerticle() {
     override suspend fun start() {
         super.start()
         router = Router.router(vertx)
+        val cors = CorsHandler.create()
+            .addOrigins(corsConfig.allowedOrigins)
+            .allowCredentials(corsConfig.allowCredentials)
+            .allowedMethods(setOf(HttpMethod.GET, HttpMethod.POST, HttpMethod.PUT, HttpMethod.PATCH,
+                HttpMethod.DELETE, HttpMethod.OPTIONS, HttpMethod.HEAD,
+                HttpMethod.PROPFIND, HttpMethod.MKCOL, HttpMethod.MOVE, HttpMethod.COPY))
+            .allowedHeaders(setOf("Authorization", "Content-Type", "Accept", "MCP-Protocol-Version", "If-Match", "If-Modified-Since",
+                "If-None-Match", "If-Unmodified-Since", "X-Requested-With", "Depth", "Destination", "Overwrite"))
+        router.route().handler(cors)
         val cookieName = "reader.session"
 	    router.route().handler(
             SessionHandler.create(LocalSessionStore.create(vertx))
@@ -39,7 +52,7 @@ abstract class RestVerticle : CoroutineVerticle() {
         );
         router.route().handler {
             it.addHeadersEndHandler { _ ->
-                val cookie = it.getCookie(cookieName)
+                val cookie = it.request().getCookie(cookieName)
                 if (cookie != null) {
                     // 每次访问都延长cookie有效期
                     cookie.setMaxAge(2L * 86400 * 1000)
@@ -49,35 +62,10 @@ abstract class RestVerticle : CoroutineVerticle() {
             it.next()
         }
 
-        // CORS support
-        router.route().handler {
-            it.addHeadersEndHandler { _ ->
-                val origin = it.request().getHeader("Origin")
-                if (origin != null && origin.isNotEmpty()) {
-                    var res = it.response()
-                    res.putHeader("Access-Control-Allow-Origin", origin)
-                    res.putHeader("Access-Control-Allow-Credentials", "true")
-                    res.putHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE")
-                    res.putHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, If-Match, If-Modified-Since, If-None-Match, If-Unmodified-Since, X-Requested-With")
-                }
-            }
-            val origin = it.request().getHeader("Origin")
-            if (origin != null && origin.isNotEmpty() && it.request().method() == HttpMethod.OPTIONS) {
-                it.removeCookie(cookieName)
-                it.success("")
-            } else {
-                it.next()
-            }
-        }
-
         router.route().handler(BodyHandler.create())
 
-        router.route().handler(LoggerHandler.create(LoggerFormat.DEFAULT));
         router.route("/reader3/*").handler {
-            logger.info("{} {}", it.request().rawMethod(), URLDecoder.decode(it.request().absoluteURI(), "UTF-8"))
-            if (!it.request().rawMethod().equals("PUT") && (it.fileUploads() == null || it.fileUploads().isEmpty()) && it.bodyAsString.length > 0 && it.bodyAsString.length < 1000) {
-                logger.info("Request body: {}", it.bodyAsString)
-            }
+            logger.info { "${it.request().method().name()} ${it.request().path()}" }
             it.next()
         }
 
@@ -91,27 +79,24 @@ abstract class RestVerticle : CoroutineVerticle() {
 //        }
 
         router.route().last().failureHandler { ctx ->
-            ctx.error(ctx.failure())
+            val failure = ctx.failure()
+            if (ctx.statusCode() in 400..499) ctx.response().setStatusCode(ctx.statusCode()).end()
+            else if (failure != null) ctx.error(failure)
+            else ctx.response().setStatusCode(ctx.statusCode()).end()
         }
 
-        logger.info("port: {}", port)
-        vertx.createHttpServer().requestHandler(router).exceptionHandler{error ->
+        logger.info { "port: ${port}" }
+        vertx.createHttpServer().requestHandler(router).exceptionHandler { error ->
             onException(error)
-        }.listen(port) { res ->
-            if (res.succeeded()) {
-                logger.info("Server running at: http://localhost:{}", port);
-                logger.info("Web reader running at: http://localhost:{}", port);
-                started();
-            } else {
-                onStartError();
-            }
-        }
+        }.listen(port).onFailure { onStartError() }.coAwait()
+        logger.info { "Server running at: http://localhost:${port}" }
+        started()
     }
 
     abstract suspend fun initRouter(router: Router);
 
     open fun onException(error: Throwable) {
-        logger.error("vertx exception: {}", error)
+        logger.error(error) { "vertx exception: ${error}" }
     }
 
     open fun onStartError() {
@@ -122,7 +107,7 @@ abstract class RestVerticle : CoroutineVerticle() {
     }
 
     open fun onHandlerError(ctx: RoutingContext, error: Exception) {
-        logger.error("Error: {}", error)
+        logger.error(error) { "Error: ${error}" }
         ctx.error(error)
     }
 
@@ -135,8 +120,10 @@ abstract class RestVerticle : CoroutineVerticle() {
                 try {
                     ctx.success(fn(ctx))
 //                    fn(ctx)
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
-                    onHandlerError(ctx, e)
+                    if (!ctx.response().closed() && !ctx.response().ended()) onHandlerError(ctx, e)
                 }
             }
         }
@@ -147,8 +134,10 @@ abstract class RestVerticle : CoroutineVerticle() {
             val job = launch(Dispatchers.IO) {
                 try {
                     fn(ctx)
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
-                    onHandlerError(ctx, e)
+                    if (!ctx.response().closed() && !ctx.response().ended()) onHandlerError(ctx, e)
                 }
             }
         }

@@ -8,6 +8,10 @@ import okhttp3.Response.Builder
  */
 @Suppress("unused", "MemberVisibilityCanBePrivate")
 class StrResponse {
+    private var callTime: Int = 0
+    fun putCallTime(value: Int) { callTime = value }
+    fun getCallTime(): Int = callTime
+    fun callTime(): Int = callTime
     var raw: Response
         private set
     var body: String? = null

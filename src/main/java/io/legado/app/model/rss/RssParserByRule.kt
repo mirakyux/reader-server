@@ -18,7 +18,8 @@ object RssParserByRule {
         body: String?,
         rssSource: RssSource,
         ruleData: RuleData,
-        debugLog: DebugLog?
+        debugLog: DebugLog?,
+        redirectUrl: String = sortUrl
     ): Pair<MutableList<RssArticle>, String?> {
         val sourceUrl = rssSource.sourceUrl
         var nextUrl: String? = null
@@ -32,12 +33,17 @@ object RssParserByRule {
         var ruleArticles = rssSource.ruleArticles
         if (ruleArticles.isNullOrBlank()) {
             debugLog?.log(sourceUrl, "⇒列表规则为空, 使用默认规则解析")
-            return RssParserDefault.parseXML(sortName, body, sourceUrl, debugLog)
+            return RssParserDefault.parseXML(sortName, body, sourceUrl, debugLog).also { parsed ->
+                parsed.first.forEach { article ->
+                    article.link = NetworkUtils.getAbsoluteURL(redirectUrl, article.link)
+                    article.image = article.image?.let { NetworkUtils.getAbsoluteURL(redirectUrl, it) }
+                }
+            }
         } else {
             val articleList = mutableListOf<RssArticle>()
             val analyzeRule = AnalyzeRule(ruleData, rssSource)
-            analyzeRule.setContent(body).setBaseUrl(sortUrl)
-            analyzeRule.setRedirectUrl(sortUrl)
+            analyzeRule.setContent(body).setBaseUrl(redirectUrl)
+            analyzeRule.setRedirectUrl(redirectUrl)
             var reverse = false
             if (ruleArticles.startsWith("-")) {
                 reverse = true
@@ -53,7 +59,7 @@ object RssParserByRule {
                 } else {
                     nextUrl = analyzeRule.getString(rssSource.ruleNextPage)
                     if (nextUrl.isNotEmpty()) {
-                        nextUrl = NetworkUtils.getAbsoluteURL(sortUrl, nextUrl)
+                        nextUrl = NetworkUtils.getAbsoluteURL(redirectUrl, nextUrl)
                     }
                 }
                 debugLog?.log(sourceUrl, "└$nextUrl")
@@ -115,7 +121,7 @@ object RssParserByRule {
         rssArticle.image = analyzeRule.getString(ruleImage, isUrl = true)
         debugLog?.log(sourceUrl, "└${rssArticle.image}", log)
         debugLog?.log(sourceUrl, "┌获取文章链接", log)
-        rssArticle.link = NetworkUtils.getAbsoluteURL(sourceUrl, analyzeRule.getString(ruleLink))
+        rssArticle.link = analyzeRule.getString(ruleLink, isUrl = true)
         debugLog?.log(sourceUrl, "└${rssArticle.link}", log)
         if (rssArticle.title.isBlank()) {
             return null

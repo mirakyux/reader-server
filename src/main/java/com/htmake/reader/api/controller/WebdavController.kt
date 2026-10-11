@@ -12,7 +12,7 @@ import io.vertx.ext.web.Route
 import io.vertx.ext.web.Router
 import io.vertx.ext.web.RoutingContext
 import io.vertx.ext.web.handler.StaticHandler;
-import mu.KotlinLogging
+import io.github.oshai.kotlinlogging.KotlinLogging
 import com.htmake.reader.config.AppConfig
 import com.htmake.reader.config.BookConfig
 import io.legado.app.constant.DeepinkBookSource
@@ -36,7 +36,6 @@ import com.htmake.reader.utils.zip
 import com.htmake.reader.utils.jsonEncode
 import com.htmake.reader.utils.getRelativePath
 import com.htmake.reader.verticle.RestVerticle
-import com.htmake.reader.SpringEvent
 import org.springframework.stereotype.Component
 import io.vertx.core.json.JsonObject
 import io.vertx.core.json.JsonArray
@@ -88,7 +87,7 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
                     res.putHeader("WWW-Authenticate", "Basic realm=\"Default realm\"")
                 }
             }
-            val rawMethod = it.request().rawMethod()
+            val rawMethod = it.request().method().name()
             if (!checkAuthorization(it)) {
                 if (
                     rawMethod.equals("PROPFIND") ||
@@ -186,7 +185,7 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
             return true
         }
         var authorization = context.request().getHeader("Authorization")
-        logger.info("authorization: {}", authorization)
+        logger.info { "authorization: ${authorization}" }
         if (authorization == null || authorization.isEmpty()) {
             return false
         }
@@ -213,12 +212,12 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
         }
         var passwordEncrypted = genEncryptedPassword(password, userInfo.salt)
         if (passwordEncrypted != userInfo.password) {
-            logger.info("user: {} password error", userInfo.username)
+            logger.info { "user: ${userInfo.username} password error" }
             return false
         }
 
         if (!userInfo.enable_webdav) {
-            logger.info("user: {} enable_webdav: false", userInfo.username)
+            logger.info { "user: ${userInfo.username} enable_webdav: false" }
             return false
         }
 
@@ -348,7 +347,7 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
             file.delete();
         }
         try {
-            file.writeBytes(context.getBody().getBytes())
+            file.writeBytes(context.body().buffer().bytes)
             // 同步用户进度
             if (file.toString().indexOf("/bookProgress/") > 0 && file.toString().indexOf(".json") > 0) {
                 val userNameSpace = getUserNameSpace(context)
@@ -529,7 +528,7 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
         var path: String
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            path = context.bodyAsJson.getString("path") ?: ""
+            path = context.body().asJsonObject().getString("path") ?: ""
         } else {
             // get 请求
             path = context.queryParam("path").firstOrNull() ?: ""
@@ -539,8 +538,10 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
             path = "/"
         }
         var home = getUserWebdavHome(context)
-        var file = File(home + path)
-        logger.info("file: {} {}", path, file)
+        val homeFile = File(home).canonicalFile
+        val file = File(homeFile, path.trimStart('/', '\\')).canonicalFile
+        require(file.toPath().startsWith(homeFile.toPath()) && file != homeFile) { "WebDAV 路径越界" }
+        logger.info { "file: ${path} ${file}" }
         if (!file.exists()) {
             return returnData.setErrorMsg("路径不存在")
         }
@@ -582,7 +583,7 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
         var path: String
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            path = context.bodyAsJson.getString("path") ?: ""
+            path = context.body().asJsonObject().getString("path") ?: ""
         } else {
             // get 请求
             path = context.queryParam("path").firstOrNull() ?: ""
@@ -593,8 +594,10 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
             return
         }
         var home = getUserWebdavHome(context)
-        var file = File(home + path)
-        logger.info("file: {} {}", path, file)
+        val homeFile = File(home).canonicalFile
+        val file = File(homeFile, path.trimStart('/', '\\')).canonicalFile
+        require(file.toPath().startsWith(homeFile.toPath()) && file != homeFile) { "WebDAV 路径越界" }
+        logger.info { "file: ${path} ${file}" }
         if (!file.exists()) {
             context.success(returnData.setErrorMsg("路径不存在"))
             return
@@ -632,7 +635,7 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
         // logger.info("type: {}", type)
         context.fileUploads().forEach {
             var file = File(it.uploadedFileName())
-            logger.info("uploadFile: {} {} {}", it.uploadedFileName(), it.fileName(), file)
+            logger.info { "uploadFile: ${it.uploadedFileName()} ${it.fileName()} ${file}" }
             if (file.exists()) {
                 var fileName = it.fileName()
                 var newFile = File(home + fileName)
@@ -642,7 +645,7 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
                 if (newFile.exists()) {
                     newFile.delete()
                 }
-                logger.info("moveTo: {}", newFile)
+                logger.info { "moveTo: ${newFile}" }
                 if (file.copyRecursively(newFile)) {
                     fileList.add(mapOf(
                         "name" to newFile.name,
@@ -675,7 +678,7 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
         var path: String
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            path = context.bodyAsJson.getString("path") ?: ""
+            path = context.body().asJsonObject().getString("path") ?: ""
         } else {
             // get 请求
             path = context.queryParam("path").firstOrNull() ?: ""
@@ -685,8 +688,10 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
             return returnData.setErrorMsg("参数错误")
         }
         var home = getUserWebdavHome(context)
-        var file = File(home + path)
-        logger.info("file: {} {}", path, file)
+        val homeFile = File(home).canonicalFile
+        val file = File(homeFile, path.trimStart('/', '\\')).canonicalFile
+        require(file.toPath().startsWith(homeFile.toPath()) && file != homeFile) { "WebDAV 路径越界" }
+        logger.info { "file: ${path} ${file}" }
         if (!file.exists()) {
             return returnData.setErrorMsg("路径不存在")
         }
@@ -708,7 +713,7 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
                 return returnData.setErrorMsg("未开启webdav功能")
             }
         }
-        var path = context.bodyAsJson.getJsonArray("path")
+        var path = context.body().asJsonObject().getJsonArray("path")
         if (path == null) {
             return returnData.setErrorMsg("参数错误")
         }
@@ -740,7 +745,7 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
         var path: String
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            path = context.bodyAsJson.getString("path") ?: ""
+            path = context.body().asJsonObject().getString("path") ?: ""
         } else {
             // get 请求
             path = context.queryParam("path").firstOrNull() ?: ""
@@ -754,8 +759,10 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
             return returnData.setErrorMsg("路径不是zip备份文件")
         }
         var home = getUserWebdavHome(context)
-        var file = File(home + path)
-        logger.info("file: {} {}", path, file)
+        val homeFile = File(home).canonicalFile
+        val file = File(homeFile, path.trimStart('/', '\\')).canonicalFile
+        require(file.toPath().startsWith(homeFile.toPath()) && file != homeFile) { "WebDAV 路径越界" }
+        logger.info { "file: ${path} ${file}" }
         if (!file.exists()) {
             return returnData.setErrorMsg("路径不存在")
         }
@@ -784,13 +791,11 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
 
         val userNameSpace = getUserNameSpace(context)
         var latestZipFilePath = bookController.getLastBackFileFromWebdav(userNameSpace)
-        if (latestZipFilePath == null) {
-            return returnData.setErrorMsg("请先使用阅读App备份到webdav")
-        }
-        if (!bookController.saveToWebdav(latestZipFilePath, userNameSpace)) {
+        if (!bookController.saveToWebdav(latestZipFilePath ?: "", userNameSpace)) {
             return returnData.setErrorMsg("备份失败")
         }
-        return returnData.setData("")
+        val archive = bookController.getLastBackFileFromWebdav(userNameSpace) ?: error("备份文件缺失")
+        return returnData.setData(mapOf("path" to ("/" + File(archive).name), "version" to 2))
     }
 
 }

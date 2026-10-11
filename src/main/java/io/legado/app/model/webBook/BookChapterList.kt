@@ -8,6 +8,7 @@ import io.legado.app.exception.TocEmptyException
 import io.legado.app.model.DebugLog
 import io.legado.app.model.analyzeRule.AnalyzeRule
 import io.legado.app.model.analyzeRule.AnalyzeUrl
+import io.legado.app.model.analyzeRule.getCheckedResponse
 import io.legado.app.utils.isTrue
 import io.legado.app.utils.TextUtils
 import kotlinx.coroutines.CoroutineScope
@@ -15,6 +16,9 @@ import kotlinx.coroutines.Dispatchers.IO
 import kotlinx.coroutines.async
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import io.legado.app.model.jsSource.SourceScriptRuntime
+import org.mozilla.javascript.Context
+import org.mozilla.javascript.ScriptableObject
 
 object BookChapterList {
 
@@ -24,7 +28,8 @@ object BookChapterList {
         bookSource: BookSource,
         baseUrl: String,
         redirectUrl: String,
-        debugLog: DebugLog? = null
+        debugLog: DebugLog? = null,
+        isFromBookInfo: Boolean = false
     ): List<BookChapter> {
         body ?: throw Exception(
 //            App.INSTANCE.getString(R.string.error_get_web_content, baseUrl)
@@ -48,7 +53,7 @@ object BookChapterList {
         var chapterData =
             analyzeChapterList(
                 book, baseUrl, redirectUrl, body,
-                tocRule, listRule, bookSource, true, true, debugLog
+                tocRule, listRule, bookSource, true, true, debugLog, isFromBookInfo
             )
         chapterList.addAll(chapterData.first)
         when (chapterData.second.size) {
@@ -62,10 +67,10 @@ object BookChapterList {
                         source = bookSource,
                         ruleData = book,
                         headerMapF = bookSource.getHeaderMap()
-                    ).getStrResponseAwait(debugLog = debugLog).body?.let { nextBody ->
+                    ).getCheckedResponse(debugLog = debugLog).body?.let { nextBody ->
                         chapterData = analyzeChapterList(
                             book, nextUrl, nextUrl,
-                            nextBody, tocRule, listRule, bookSource, true, false, debugLog
+                            nextBody, tocRule, listRule, bookSource, true, false, debugLog, isFromBookInfo
                         )
                         nextUrl = chapterData.second.firstOrNull() ?: ""
                         chapterList.addAll(chapterData.first)
@@ -85,10 +90,10 @@ object BookChapterList {
                                 ruleData = book,
                                 headerMapF = bookSource.getHeaderMap()
                             )
-                            val res = analyzeUrl.getStrResponseAwait(debugLog = debugLog)
+                            val res = analyzeUrl.getCheckedResponse(debugLog = debugLog)
                             analyzeChapterList(
                                 book, urlStr, res.url,
-                                res.body!!, tocRule, listRule, bookSource, false, false, debugLog
+                                res.body!!, tocRule, listRule, bookSource, false, false, debugLog, isFromBookInfo
                             ).first
                         }
                     }
@@ -114,6 +119,7 @@ object BookChapterList {
         list.forEachIndexed { index, bookChapter ->
             bookChapter.index = index
         }
+        formatTitles(book, bookSource, list, debugLog)
         if (list.size > 0) {
             book.latestChapterTitle = list.last().title
         }
@@ -128,6 +134,23 @@ object BookChapterList {
         return list
     }
 
+    fun formatTitles(book: Book, source: BookSource, chapters: List<BookChapter>, debug: DebugLog? = null) {
+        val script = source.getTocRule().formatJs?.takeIf { it.isNotBlank() } ?: return
+        SourceScriptRuntime.run(source, mapOf("book" to book, "gInt" to 0)) { cx, scope ->
+            source.mainJs?.takeIf { it.isNotBlank() }?.let { cx.evaluateString(scope, it, "mainJs", 1, null) }
+            chapters.forEachIndexed { index, chapter ->
+                ScriptableObject.putProperty(scope, "index", index + 1)
+                ScriptableObject.putProperty(scope, "chapter", Context.javaToJS(chapter, scope))
+                ScriptableObject.putProperty(scope, "title", chapter.title)
+                try {
+                    val value = SourceScriptRuntime.unwrap(cx.evaluateString(scope, script, "formatJs", 1, null))
+                    if (value != null) chapter.title = Context.toString(value)
+                } catch (error: kotlinx.coroutines.CancellationException) { throw error }
+                catch (error: Exception) { debug?.log(source.getKey(), "格式化标题失败: ${error.message}") }
+            }
+        }
+    }
+
     private fun analyzeChapterList(
         book: Book,
         baseUrl: String,
@@ -138,9 +161,10 @@ object BookChapterList {
         bookSource: BookSource,
         getNextUrl: Boolean = true,
         log: Boolean = false,
-        debugLog: DebugLog? = null
+        debugLog: DebugLog? = null,
+        isFromBookInfo: Boolean = false
     ): Pair<List<BookChapter>, List<String>>  {
-        val analyzeRule = AnalyzeRule(book, bookSource)
+        val analyzeRule = AnalyzeRule(book, bookSource, isFromBookInfo = isFromBookInfo)
         analyzeRule.setContent(body).setBaseUrl(baseUrl)
         analyzeRule.setRedirectUrl(redirectUrl)
         //获取目录列表
@@ -167,6 +191,7 @@ object BookChapterList {
             val nameRule = analyzeRule.splitSourceRule(tocRule.chapterName)
             val urlRule = analyzeRule.splitSourceRule(tocRule.chapterUrl)
             val vipRule = analyzeRule.splitSourceRule(tocRule.isVip)
+            val payRule = analyzeRule.splitSourceRule(tocRule.isPay)
             val upTimeRule = analyzeRule.splitSourceRule(tocRule.updateTime)
             val isVolumeRule = analyzeRule.splitSourceRule(tocRule.isVolume)
             elements.forEachIndexed { index, item ->
@@ -191,8 +216,9 @@ object BookChapterList {
                     }
                 }
                 if (bookChapter.title.isNotEmpty()) {
-                    var isVip = analyzeRule.getString(vipRule)
-                    if (isVip.isTrue()) {
+                    bookChapter.isVip = analyzeRule.getString(vipRule).isTrue()
+                    bookChapter.isPay = analyzeRule.getString(payRule).isTrue()
+                    if (bookChapter.isVip && !bookChapter.isPay) {
                         bookChapter.title = "\uD83D\uDD12" + bookChapter.title
                     }
                     chapterList.add(bookChapter)

@@ -334,7 +334,7 @@ public class NCXDocumentV2 {
         serializer.endTag(NAMESPACE_NCX, NCXTags.navLabel);
         serializer.startTag(NAMESPACE_NCX, NCXTags.content);
         serializer.attribute(EpubWriter.EMPTY_NAMESPACE_PREFIX, NCXAttributes.src,
-                tocReference.getCompleteHref());
+                StringUtil.encodeHref(tocReference.getResource().getHref(), tocReference.getFragmentId()));
         serializer.endTag(NAMESPACE_NCX, NCXTags.content);
     }
     @SuppressWarnings("unused")

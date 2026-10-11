@@ -11,5 +11,6 @@ data class BookInfoRule(
     var coverUrl: String? = null,
     var tocUrl: String? = null,
     var wordCount: String? = null,
-    var canReName: String? = null
-)
+    var canReName: String? = null,
+    var downloadUrls: String? = null
+) : io.legado.app.help.source.SourceFields()

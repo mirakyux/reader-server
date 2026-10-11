@@ -1,83 +1,42 @@
-name: Publish Github Releases
-
+name: Package independent releases
 on:
-  # push:
-  #   tags:
-  #     - 'v**'
-  #   branches:
-  #     - master
   workflow_dispatch:
-
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
 jobs:
-  buildRelease:
-    if: github.repository == 'hectorqin/reader'
-    name: "Build And Release"
-    runs-on: macos-11
+  release:
+    runs-on: ubuntu-latest
     steps:
-      -
-        name: Checkout
-        uses: actions/checkout@v2
-      -
-        name: Setup node
-        uses: actions/setup-node@v2
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-java@v6.0.1
         with:
-          node-version: '14'
-      -
-        name: Build web
-        run: cd web && npm install && npm run build && mv ./dist ../src/main/resources/web
-      -
-        name: Setup Java
-        uses: actions/setup-java@v2
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - uses: actions/setup-node@v7.1.0
         with:
-          distribution: 'temurin'
-          java-version: '11'
-          cache: 'gradle'
-      -
-        name: Build MacOS package
-        run:
-          JAVAFX_PLATFORM=mac ./gradlew packageReaderMac
-      -
-        name: Build Linux package
-        run:
-          JAVAFX_PLATFORM=linux ./gradlew packageReaderLinux
-      -
-        name: Build Windows package
-        run:
-          JAVAFX_PLATFORM=win ./gradlew packageReaderWin
-      -
-        name: Build server jar
-        run:
-          rm src/main/java/com/htmake/reader/ReaderUIApplication.kt && gradle -b cli.gradle assemble --info
-      -
-        name: Show files.
-        run: |
-          echo Showing current directory:
-          ls
-          echo Showing ./target directory:
-          ls ./build
-          echo Showing ./target directory:
-          ls ./build/libs
-      -
-        name: Pre Release
-        if: ${{contains(github.ref, 'master')}}
-        uses: "marvinpinto/action-automatic-releases@latest"
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build and validate API
+        run: chmod +x gradlew && ./gradlew --no-daemon test bootJar
+      - name: Build and validate React
+        working-directory: web
+        run: npm ci && npm run lint && npm test && npm run build
+      - name: Package web
+        run: tar -czf reader-web.tar.gz -C web/dist .
+      - name: Validate browser
+        working-directory: browser
+        run: npm ci && npx playwright install --with-deps chromium && npm test
+      - name: Package browser
+        run: tar -czf reader-browser.tar.gz -C browser package.json package-lock.json server.mjs quickjs.mjs quickjs-worker.mjs quickjs-runtime README.md Dockerfile
+      - uses: softprops/action-gh-release@v3.0.3
+        if: startsWith(github.ref, 'refs/tags/')
         with:
-          repo_token: "${{ secrets.GITHUB_TOKEN }}"
-          automatic_release_tag: "latest"
-          prerelease: true
-          title: "Development Build"
+          generate_release_notes: true
           files: |
-            ./build/*.pkg
-            ./build/*.zip
-            ./build/libs/*.jar
-      -
-        name: Tagged Release
-        if: ${{contains(github.ref, 'v')}}
-        uses: "marvinpinto/action-automatic-releases@latest"
-        with:
-          repo_token: "${{ secrets.GITHUB_TOKEN }}"
-          prerelease: false
-          files: |
-            ./build/*.pkg
-            ./build/*.zip
-            ./build/libs/*.jar
+            build/backend/libs/reader.jar
+            reader-web.tar.gz
+            reader-browser.tar.gz

@@ -1,0 +1,12 @@
+.reader-view { position: relative; }
+.reader-main { position: relative; z-index: 1; }
+.reader-background { position: fixed; inset: 0; z-index: 0; pointer-events: none; background-position: center; background-repeat: no-repeat; }
+.appearance-settings details { border: 1px solid #dfe5d9; border-radius: 8px; padding: 12px; }
+.appearance-settings summary { cursor: pointer; font-size: 13px; font-weight: 500; }
+.asset-item { display: flex; align-items: center; justify-content: space-between; font-size: 13px; word-break: break-word; }
+.background-assets { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; }
+.background-assets > div { display: flex; align-items: center; gap: 2px; }
+.background-assets button:not([data-slot]) { flex: 1; border: 1px solid #dfe5d9; border-radius: 7px; overflow: hidden; font-size: 11px; text-align: center; }
+.background-assets button.selected { outline: 2px solid #698572; }
+.background-assets img { width: 100%; height: 65px; object-fit: cover; }
+.background-assets span { display: block; padding: 7px 3px; }

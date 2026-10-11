@@ -7,7 +7,7 @@ import io.vertx.core.Handler
 import io.vertx.core.json.JsonObject
 import io.vertx.core.json.JsonArray
 import io.vertx.ext.web.RoutingContext
-import mu.KotlinLogging
+import io.github.oshai.kotlinlogging.KotlinLogging
 import com.htmake.reader.entity.BasicError
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -20,6 +20,11 @@ import kotlin.reflect.KMutableProperty
 import kotlin.reflect.full.memberProperties
 import io.legado.app.data.entities.Book
 import io.legado.app.utils.MD5Utils
+import com.htmake.reader.api.service.UserDataFiles
+import com.htmake.reader.api.service.advanced.AdvancedStore
+import com.htmake.reader.api.service.ChapterCache
+import io.legado.app.data.entities.BookChapter
+import java.nio.file.Files
 
 /**
  * @Auther: zoharSoul
@@ -47,7 +52,7 @@ fun RoutingContext.success(any: Any?) {
 }
 
 fun RoutingContext.error(throwable: Throwable) {
-    val path = URLDecoder.decode(this.request().absoluteURI(), "UTF-8")
+    val path = this.request().path()
     val basicError = BasicError(
             "Internal Server Error",
             throwable.toString(),
@@ -58,7 +63,7 @@ fun RoutingContext.error(throwable: Throwable) {
     )
 
     val errorJson = gson.toJson(basicError)
-    logger.error("Internal Server Error", throwable)
+    logger.error(throwable) { "Internal Server Error" }
     logger.error { errorJson }
 
     this.response()
@@ -71,7 +76,7 @@ fun getWorkDir(subPath: String = ""): String {
     if (!workDirInit && workDirPath.isEmpty()) {
         var osName = System.getProperty("os.name")
         var currentDir = System.getProperty("user.dir")
-        logger.info("osName: {} currentDir: {}", osName, currentDir)
+        logger.info { "osName: ${osName} currentDir: ${currentDir}" }
         // MacOS 存放目录为用户目录
         if (osName.startsWith("Mac OS", true) && !currentDir.startsWith("/Users/")) {
             workDirPath = Paths.get(System.getProperty("user.home"), ".reader").toString()
@@ -125,7 +130,15 @@ fun getStoragePath(): String {
     return storagePath;
 }
 
-fun saveStorage(vararg name: String, value: Any, pretty: Boolean = false) {
+private fun storageFile(vararg name: String): File {
+    require(name.isNotEmpty())
+    return Paths.get(getStoragePath(), *name.copyOfRange(0, name.size - 1), "${name.last()}.json").toFile()
+}
+
+fun <T> storageTransaction(vararg name: String, action: () -> T): T =
+    synchronized(UserDataFiles.lockFor(storageFile(*name).toPath()), action)
+
+fun saveStorage(vararg name: String, value: Any, pretty: Boolean = false) = storageTransaction(*name) {
     val toJson: String = if (value is JsonObject || value is JsonArray) {
         value.toString()
     } else if (pretty) {
@@ -134,41 +147,68 @@ fun saveStorage(vararg name: String, value: Any, pretty: Boolean = false) {
         gson.toJson(value)
     }
 
-    var storagePath = getStoragePath()
-    var storageDir = File(storagePath)
-    if (!storageDir.exists()) {
-        storageDir.mkdirs()
-    }
+    val file = storageFile(*name)
+    logger.info { "Save file to storage name: ${name} path: ${file.absoluteFile}" }
 
-    val filename = name.last()
-    val file = File(getRelativePath(storagePath, *name.copyOfRange(0, name.size - 1), "${filename}.json"))
-    // val file = File(storagePath + "/${name}.json")
-    logger.info("Save file to storage name: {} path: {}", name, file.absoluteFile)
-
-    if (!file.parentFile.exists()) {
-        file.parentFile.mkdirs()
-    }
-
-    if (!file.exists()) {
-        file.createNewFile()
-    }
-    file.writeText(toJson)
+    AdvancedStore.atomicWrite(file.toPath(), toJson.toByteArray(Charsets.UTF_8))
 }
 
-fun getStorage(vararg name: String): String?  {
-    var storagePath = getStoragePath()
-    var storageDir = File(storagePath)
-    if (!storageDir.exists()) {
-        storageDir.mkdirs()
-    }
-
-    val filename = name.last()
-    val file = File(getRelativePath(storagePath, *name.copyOfRange(0, name.size - 1), "${filename}.json"))
-    logger.info("Read file from storage name: {} path: {}", name, file.absoluteFile)
+fun getStorage(vararg name: String): String? = storageTransaction(*name) {
+    val file = storageFile(*name)
+    logger.info { "Read file from storage name: ${name} path: ${file.absoluteFile}" }
     if (!file.exists()) {
-        return null
+        return@storageTransaction null
     }
-    return file.readText()
+    file.readText(Charsets.UTF_8)
+}
+
+/** New writes use the configured root; legacy files are copied once and remain recoverable. */
+fun storageDirectory(vararg parts: String): File {
+    val directory = Paths.get(getStoragePath(), *parts).toFile()
+    val legacy = Paths.get(getWorkDir("storage"), *parts).toFile()
+    val imported = File(directory.parentFile, ".${directory.name}.legacy-imported")
+    if (directory.canonicalFile != legacy.canonicalFile && legacy.isDirectory && !imported.exists()) {
+        synchronized(UserDataFiles.lockFor(directory.toPath())) {
+            if (!imported.exists()) {
+                val catalogs = legacy.listFiles()?.filter {
+                    it.isDirectory && it.name.matches(Regex("[a-fA-F0-9]{32}")) && File(legacy, "${it.name}.json").isFile
+                }.orEmpty()
+                val cacheNames = catalogs.map { it.name }.toSet()
+                // A legacy body belongs to its legacy catalog, which may differ from a newer configured catalog.
+                catalogs.forEach { cache ->
+                    fun chapters(file: File): List<BookChapter> {
+                        val array = JsonArray(file.readText(Charsets.UTF_8))
+                        return (0 until array.size()).map { array.getJsonObject(it).mapTo(BookChapter::class.java) }
+                    }
+                    val oldCatalog = chapters(File(legacy, "${cache.name}.json"))
+                    val targetCatalog = File(directory, "${cache.name}.json")
+                    val currentCatalog = if (targetCatalog.isFile) chapters(targetCatalog) else oldCatalog
+                    Files.createDirectories(directory.parentFile.toPath())
+                    val staging = Files.createTempDirectory(directory.parentFile.toPath(), ".legacy-cache-").toFile()
+                    try {
+                        cache.copyRecursively(staging, overwrite = true)
+                        ChapterCache.reconcile(staging, oldCatalog, currentCatalog)
+                        val targetCache = File(directory, cache.name)
+                        val occupied = targetCache.listFiles()?.filter { it.name.matches(Regex("\\d+\\.txt")) }
+                            ?.map { it.name.substringBefore('.') }?.toSet().orEmpty()
+                        staging.walkTopDown().filter { it.isFile }.forEach { file ->
+                            val relative = file.relativeTo(staging)
+                            val target = File(targetCache, relative.path)
+                            val belongsToOccupiedBody = relative.parent == null && file.name.substringBefore('.') in occupied
+                            if (!belongsToOccupiedBody && !target.exists()) AdvancedStore.atomicWrite(target.toPath(), file.readBytes())
+                        }
+                    } finally { staging.deleteRecursively() }
+                }
+                legacy.walkTopDown().onEnter { it == legacy || it.parentFile != legacy || it.name !in cacheNames }
+                    .filter { it.isFile }.forEach { file ->
+                    val target = File(directory, file.relativeTo(legacy).path)
+                    if (!target.exists()) AdvancedStore.atomicWrite(target.toPath(), file.readBytes())
+                }
+                AdvancedStore.atomicWrite(imported.toPath(), byteArrayOf())
+            }
+        }
+    }
+    return directory
 }
 
 fun asJsonArray(value: Any?): JsonArray? {

@@ -11,7 +11,7 @@ import io.vertx.ext.web.Route
 import io.vertx.ext.web.Router
 import io.vertx.ext.web.RoutingContext
 import io.vertx.ext.web.handler.StaticHandler;
-import mu.KotlinLogging
+import io.github.oshai.kotlinlogging.KotlinLogging
 import com.htmake.reader.config.AppConfig
 import com.htmake.reader.config.BookConfig
 import io.legado.app.constant.DeepinkBookSource
@@ -35,7 +35,6 @@ import com.htmake.reader.utils.zip
 import com.htmake.reader.utils.jsonEncode
 import com.htmake.reader.utils.getRelativePath
 import com.htmake.reader.verticle.RestVerticle
-import com.htmake.reader.SpringEvent
 import org.springframework.stereotype.Component
 import io.vertx.core.json.JsonObject
 import io.vertx.core.json.JsonArray
@@ -88,7 +87,8 @@ class BookmarkController(coroutineContext: CoroutineContext): BaseController(cor
         if (!checkAuth(context)) {
             return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
         }
-        val bookmark = context.bodyAsJson.mapTo(Bookmark::class.java)
+        val bookmark = context.body().asJsonObject().mapTo(Bookmark::class.java)
+        bookmark.validate()
         if (bookmark.bookName.isEmpty() && bookmark.bookAuthor.isEmpty()) {
             return returnData.setErrorMsg("书籍信息错误")
         }
@@ -102,7 +102,7 @@ class BookmarkController(coroutineContext: CoroutineContext): BaseController(cor
         var existIndex: Int = -1
         for (i in 0 until bookmarkList.size()) {
             var _bookmark = bookmarkList.getJsonObject(i).mapTo(Bookmark::class.java)
-            if (_bookmark.bookName.equals(bookmark.bookName) && _bookmark.bookAuthor.equals(bookmark.bookAuthor)) {
+            if (_bookmark.time == bookmark.time && _bookmark.bookName == bookmark.bookName && _bookmark.bookAuthor == bookmark.bookAuthor) {
                 existIndex = i
                 break;
             }
@@ -126,7 +126,7 @@ class BookmarkController(coroutineContext: CoroutineContext): BaseController(cor
         if (!checkAuth(context)) {
             return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
         }
-        val bookmarkJsonArray = context.bodyAsJsonArray
+        val bookmarkJsonArray = context.body().asJsonArray()
         if (bookmarkJsonArray == null) {
             return returnData.setErrorMsg("参数错误")
         }
@@ -137,6 +137,7 @@ class BookmarkController(coroutineContext: CoroutineContext): BaseController(cor
         }
         for (k in 0 until bookmarkJsonArray.size()) {
             var bookmark = bookmarkJsonArray.getJsonObject(k).mapTo(Bookmark::class.java)
+            bookmark.validate()
             if (bookmark.bookName.isEmpty() && bookmark.bookAuthor.isEmpty()) {
                 continue
             }
@@ -144,7 +145,7 @@ class BookmarkController(coroutineContext: CoroutineContext): BaseController(cor
             var existIndex: Int = -1
             for (i in 0 until bookmarkList!!.size()) {
                 var _bookmark = bookmarkList.getJsonObject(i).mapTo(Bookmark::class.java)
-                if (_bookmark.bookName.equals(bookmark.bookName) && _bookmark.bookAuthor.equals(bookmark.bookAuthor)) {
+                if (_bookmark.time == bookmark.time && _bookmark.bookName == bookmark.bookName && _bookmark.bookAuthor == bookmark.bookAuthor) {
                     existIndex = i
                     break;
                 }
@@ -170,7 +171,7 @@ class BookmarkController(coroutineContext: CoroutineContext): BaseController(cor
         if (!checkAuth(context)) {
             return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
         }
-        val bookmark = context.bodyAsJson.mapTo(Bookmark::class.java)
+        val bookmark = context.body().asJsonObject().mapTo(Bookmark::class.java)
         var userNameSpace = getUserNameSpace(context)
         var bookmarkList: JsonArray? = asJsonArray(getUserStorage(userNameSpace, "bookmark"))
         if (bookmarkList == null) {
@@ -180,7 +181,7 @@ class BookmarkController(coroutineContext: CoroutineContext): BaseController(cor
         var existIndex: Int = -1
         for (i in 0 until bookmarkList.size()) {
             var _bookmark = bookmarkList.getJsonObject(i).mapTo(Bookmark::class.java)
-            if (_bookmark.bookName.equals(bookmark.bookName) && _bookmark.bookAuthor.equals(bookmark.bookAuthor)) {
+            if (_bookmark.time == bookmark.time && _bookmark.bookName == bookmark.bookName && _bookmark.bookAuthor == bookmark.bookAuthor) {
                 existIndex = i
                 break;
             }
@@ -198,7 +199,7 @@ class BookmarkController(coroutineContext: CoroutineContext): BaseController(cor
         if (!checkAuth(context)) {
             return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
         }
-        val bookmarkJsonArray = context.bodyAsJsonArray
+        val bookmarkJsonArray = context.body().asJsonArray()
 
         var userNameSpace = getUserNameSpace(context)
         var bookmarkList: JsonArray? = asJsonArray(getUserStorage(userNameSpace, "bookmark"))
@@ -207,11 +208,11 @@ class BookmarkController(coroutineContext: CoroutineContext): BaseController(cor
         }
         for (k in 0 until bookmarkJsonArray.size()) {
             var bookmark = bookmarkJsonArray.getJsonObject(k).mapTo(Bookmark::class.java)
-            // 遍历判断书本是否存在
+                // 遍历判断书本是否存在
             var existIndex: Int = -1
             for (i in 0 until bookmarkList.size()) {
                 var _bookmark = bookmarkList.getJsonObject(i).mapTo(Bookmark::class.java)
-                if (_bookmark.bookName.equals(bookmark.bookName) && _bookmark.bookAuthor.equals(bookmark.bookAuthor)) {
+                if (_bookmark.time == bookmark.time && _bookmark.bookName == bookmark.bookName && _bookmark.bookAuthor == bookmark.bookAuthor) {
                     existIndex = i
                     break;
                 }

@@ -12,7 +12,7 @@ import io.vertx.ext.web.Route
 import io.vertx.ext.web.Router
 import io.vertx.ext.web.RoutingContext
 import io.vertx.ext.web.handler.StaticHandler;
-import mu.KotlinLogging
+import io.github.oshai.kotlinlogging.KotlinLogging
 import com.htmake.reader.config.AppConfig
 import com.htmake.reader.config.BookConfig
 import io.legado.app.constant.DeepinkBookSource
@@ -36,7 +36,6 @@ import com.htmake.reader.utils.zip
 import com.htmake.reader.utils.jsonEncode
 import com.htmake.reader.utils.getRelativePath
 import com.htmake.reader.verticle.RestVerticle
-import com.htmake.reader.SpringEvent
 import org.springframework.stereotype.Component
 import io.vertx.core.json.JsonObject
 import io.vertx.core.json.JsonArray
@@ -74,7 +73,7 @@ class UserController(coroutineContext: CoroutineContext): BaseController(corouti
     val userMaxCount = 50
 
     private fun getUserLimit(context: RoutingContext): Int {
-        if (context.request().host().equals("reader.htmake.com")) {
+        if (context.request().getHeader("Host").equals("reader.htmake.com")) {
             return 500;
         }
         return Math.min(Math.max(appConfig.userLimit, 1), userMaxCount)
@@ -82,9 +81,9 @@ class UserController(coroutineContext: CoroutineContext): BaseController(corouti
 
     suspend fun login(context: RoutingContext): ReturnData {
         val returnData = ReturnData()
-        val username = context.bodyAsJson.getString("username", "") ?: ""
-        val password = context.bodyAsJson.getString("password", "") ?: ""
-        val isLogin = context.bodyAsJson.getBoolean("isLogin", false) ?: false
+        val username = context.body().asJsonObject().getString("username", "") ?: ""
+        val password = context.body().asJsonObject().getString("password", "") ?: ""
+        val isLogin = context.body().asJsonObject().getBoolean("isLogin", false) ?: false
         if (username.isNullOrEmpty()) {
             return returnData.setErrorMsg("请输入用户名")
         }
@@ -117,7 +116,7 @@ class UserController(coroutineContext: CoroutineContext): BaseController(corouti
             }
             if (appConfig.inviteCode.isNotEmpty()) {
                 // 需要填入邀请码才能注册
-                val code = context.bodyAsJson.getString("code") ?: ""
+                val code = context.body().asJsonObject().getString("code") ?: ""
                 if (code.isNullOrEmpty()) {
                     return returnData.setErrorMsg("请输入邀请码")
                 }
@@ -233,8 +232,8 @@ class UserController(coroutineContext: CoroutineContext): BaseController(corouti
         if (!appConfig.secure || appConfig.secureKey.isEmpty()) {
             return returnData.setErrorMsg("不支持的操作")
         }
-        val username = context.bodyAsJson.getString("username") ?: ""
-        val password = context.bodyAsJson.getString("password") ?: ""
+        val username = context.body().asJsonObject().getString("username") ?: ""
+        val password = context.body().asJsonObject().getString("password") ?: ""
         if (username.isNullOrEmpty()) {
             return returnData.setErrorMsg("请输入用户名")
         }
@@ -294,8 +293,8 @@ class UserController(coroutineContext: CoroutineContext): BaseController(corouti
         if (!appConfig.secure || appConfig.secureKey.isEmpty()) {
             return returnData.setErrorMsg("不支持的操作")
         }
-        val username = context.bodyAsJson.getString("username") ?: ""
-        val password = context.bodyAsJson.getString("password") ?: ""
+        val username = context.body().asJsonObject().getString("username") ?: ""
+        val password = context.body().asJsonObject().getString("password") ?: ""
         if (username.isNullOrEmpty()) {
             return returnData.setErrorMsg("请输入用户名")
         }
@@ -347,7 +346,7 @@ class UserController(coroutineContext: CoroutineContext): BaseController(corouti
         var userMapJson: JsonObject? = asJsonObject(getStorage("data", "users"))
 
         if (userMapJson != null) {
-            val userJsonArray = context.bodyAsJsonArray
+            val userJsonArray = context.body().asJsonArray()
             for (i in 0 until userJsonArray.size()) {
                 var username = userJsonArray.getString(i)
                 if (username != null && userMapJson.containsKey(username)) {
@@ -355,7 +354,7 @@ class UserController(coroutineContext: CoroutineContext): BaseController(corouti
                     userMapJson.remove(username)
                     // 移除用户目录
                     var userHome = File(getWorkDir("storage", "data", username))
-                    logger.info("delete userHome: {}", userHome)
+                    logger.info { "delete userHome: ${userHome}" }
                     if (userHome.exists()) {
                         userHome.deleteRecursively()
                     }
@@ -383,9 +382,9 @@ class UserController(coroutineContext: CoroutineContext): BaseController(corouti
         if (!checkManagerAuth(context)) {
             return returnData.setData("NEED_SECURE_KEY").setErrorMsg("请输入管理密码")
         }
-        val username = context.bodyAsJson.getString("username") ?: ""
-        val enableWebdav = context.bodyAsJson.getBoolean("enableWebdav")
-        val enableLocalStore = context.bodyAsJson.getBoolean("enableLocalStore")
+        val username = context.body().asJsonObject().getString("username") ?: ""
+        val enableWebdav = context.body().asJsonObject().getBoolean("enableWebdav")
+        val enableLocalStore = context.body().asJsonObject().getBoolean("enableLocalStore")
         if (username.isEmpty()) {
             return returnData.setErrorMsg("参数错误")
         }
@@ -443,14 +442,15 @@ class UserController(coroutineContext: CoroutineContext): BaseController(corouti
         if (!checkAuth(context)) {
             return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
         }
-        val content = context.bodyAsJson
+        val content = context.body().asJsonObject()
         if (content == null) {
             return returnData.setErrorMsg("参数错误")
         }
-        content.put("@updateTime", System.currentTimeMillis())
-
         val userNameSpace = getUserNameSpace(context)
-        saveUserStorage(userNameSpace, "userConfig", content)
+        val merge = content.remove("@merge") == true
+        val saved = if (merge) (asJsonObject(getUserStorage(userNameSpace, "userConfig")) ?: JsonObject()).mergeIn(content) else content
+        saved.put("@updateTime", System.currentTimeMillis())
+        saveUserStorage(userNameSpace, "userConfig", saved)
         return returnData.setData("")
     }
 
@@ -484,7 +484,7 @@ class UserController(coroutineContext: CoroutineContext): BaseController(corouti
         // logger.info("type: {}", type)
         context.fileUploads().forEach {
             var file = File(it.uploadedFileName())
-            logger.info("uploadFile: {} {} {}", it.uploadedFileName(), it.fileName(), file)
+            logger.info { "uploadFile: ${it.uploadedFileName()} ${it.fileName()} ${file}" }
             if (file.exists()) {
                 var fileName = it.fileName()
                 var newFile = File(getWorkDir("storage", "assets", userNameSpace, type, fileName))
@@ -494,7 +494,7 @@ class UserController(coroutineContext: CoroutineContext): BaseController(corouti
                 if (newFile.exists()) {
                     newFile.delete()
                 }
-                logger.info("moveTo: {}", newFile)
+                logger.info { "moveTo: ${newFile}" }
                 if (file.copyRecursively(newFile)) {
                     fileList.add("/assets/" + userNameSpace + "/" + type + "/" + fileName)
                 }
@@ -512,7 +512,7 @@ class UserController(coroutineContext: CoroutineContext): BaseController(corouti
         var url: String
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            url = context.bodyAsJson.getString("url") ?: ""
+            url = context.body().asJsonObject().getString("url") ?: ""
         } else {
             // get 请求
             url = context.queryParam("url").firstOrNull() ?: ""
@@ -525,7 +525,7 @@ class UserController(coroutineContext: CoroutineContext): BaseController(corouti
             return returnData.setErrorMsg("文件链接错误")
         }
         var file = File(getWorkDir("storage" + url))
-        logger.info("delete file: {}", file)
+        logger.info { "delete file: ${file}" }
         file.deleteRecursively()
         return returnData.setData("")
     }

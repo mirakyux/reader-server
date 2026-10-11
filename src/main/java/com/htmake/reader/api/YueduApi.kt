@@ -11,7 +11,8 @@ import io.legado.app.model.webBook.WebBook
 import io.vertx.ext.web.Router
 import io.vertx.ext.web.RoutingContext
 import io.vertx.ext.web.handler.StaticHandler;
-import mu.KotlinLogging
+import io.vertx.ext.web.handler.FileSystemAccess
+import io.github.oshai.kotlinlogging.KotlinLogging
 import com.htmake.reader.config.AppConfig
 import com.htmake.reader.config.BookConfig
 import io.legado.app.constant.DeepinkBookSource
@@ -22,6 +23,9 @@ import com.htmake.reader.api.controller.UserController
 import com.htmake.reader.api.controller.WebdavController
 import com.htmake.reader.api.controller.ReplaceRuleController
 import com.htmake.reader.api.controller.BookmarkController
+import com.htmake.reader.api.controller.AdvancedCapabilityController
+import com.htmake.reader.api.controller.SourceActionController
+import com.htmake.reader.api.controller.SourceBrowserController
 import com.htmake.reader.utils.error
 import com.htmake.reader.utils.success
 import com.htmake.reader.utils.getStorage
@@ -35,14 +39,12 @@ import com.htmake.reader.utils.getWorkDir
 import com.htmake.reader.utils.getRandomString
 import com.htmake.reader.utils.genEncryptedPassword
 import com.htmake.reader.entity.User
-import com.htmake.reader.utils.SpringContextUtils
 import com.htmake.reader.utils.deleteRecursively
 import com.htmake.reader.utils.unzip
 import com.htmake.reader.utils.zip
 import com.htmake.reader.utils.jsonEncode
 import com.htmake.reader.utils.getRelativePath
 import com.htmake.reader.verticle.RestVerticle
-import com.htmake.reader.SpringEvent
 import org.springframework.stereotype.Component
 import io.vertx.core.json.JsonObject
 import io.vertx.core.json.JsonArray
@@ -89,9 +91,6 @@ class YueduApi : RestVerticle() {
         // 旧版数据迁移
         migration()
 
-        // web界面
-        router.route("/*").handler(StaticHandler.create("web").setDefaultContentEncoding("UTF-8"));
-
         // assets
         var assetsDir = getWorkDir("storage", "assets");
         var assetsDirFile = File(assetsDir);
@@ -103,7 +102,7 @@ class YueduApi : RestVerticle() {
         if (!assetsCssFile.exists()) {
             assetsCssFile.writeText("/* 在此处可以编写CSS样式来自定义页面 */");
         }
-        router.route("/assets/*").handler(StaticHandler.create().setAllowRootFileSystemAccess(true).setWebRoot(assetsDir).setDefaultContentEncoding("UTF-8"));
+        router.route("/assets/*").handler(StaticHandler.create(FileSystemAccess.ROOT, assetsDir).setDefaultContentEncoding("UTF-8"));
 
         // epub资源
         var dataDir = getWorkDir("storage", "data");
@@ -119,7 +118,7 @@ class YueduApi : RestVerticle() {
             }
             it.next()
         }
-        router.route("/epub/*").handler(StaticHandler.create().setAllowRootFileSystemAccess(true).setWebRoot(dataDir).setDefaultContentEncoding("UTF-8"));
+        router.route("/epub/*").handler(StaticHandler.create(FileSystemAccess.ROOT, dataDir).setDefaultContentEncoding("UTF-8"));
 
         // 获取系统信息
         router.get("/reader3/getSystemInfo").coroutineHandler { getSystemInfo(it) }
@@ -135,10 +134,83 @@ class YueduApi : RestVerticle() {
         }
         val replaceRuleController = ReplaceRuleController(coroutineContext)
         val bookmarkController = BookmarkController(coroutineContext)
+        val readingFeatures = com.htmake.reader.api.controller.ReadingFeatureController(coroutineContext, bookController)
+        val readerData = com.htmake.reader.api.controller.ReaderDataController(coroutineContext, bookController)
+        router.get("/reader3/rss/library").coroutineHandler { readerData.rssLibrary(it) }
+        router.post("/reader3/rss/article").coroutineHandler { readerData.saveRssArticle(it) }
+        router.post("/reader3/rss/article/delete").coroutineHandler { readerData.deleteRssArticle(it) }
+        router.post("/reader3/rss/article/cache").coroutineHandler { readerData.cacheRssArticle(it) }
+        router.get("/reader3/rss/categories").coroutineHandler { readerData.rssCategories(it) }
+        router.post("/reader3/rss/debug").coroutineHandler { readerData.debugRssSource(it) }
+        router.post("/reader3/reading/stats/delete").coroutineHandler { readerData.deleteReadingStatistics(it) }
+        router.get("/reader3/sync/webdav/config").coroutineHandler { readerData.remoteConfig(it) }
+        router.post("/reader3/sync/webdav/config").coroutineHandler { readerData.saveRemoteConfig(it) }
+        router.post("/reader3/sync/webdav/test").coroutineHandler { readerData.testRemote(it) }
+        router.get("/reader3/sync/webdav/backups").coroutineHandler { readerData.listRemoteBackups(it) }
+        router.post("/reader3/sync/webdav/backup").coroutineHandler { readerData.backupRemote(it) }
+        router.post("/reader3/sync/webdav/restore").coroutineHandler { readerData.restoreRemote(it) }
+        router.post("/reader3/sync/webdav/progress").coroutineHandler { readerData.syncRemoteProgress(it) }
+        router.get("/reader3/getChapterEdit").coroutineHandler { readingFeatures.getChapterEdit(it) }
+        router.post("/reader3/getChapterEdit").coroutineHandler { readingFeatures.getChapterEdit(it) }
+        router.post("/reader3/getChapterMediaText").coroutineHandler { readingFeatures.getChapterMediaText(it) }
+        router.post("/reader3/saveChapterEdit").coroutineHandler { readingFeatures.saveChapterEdit(it) }
+        router.post("/reader3/restoreChapterEdit").coroutineHandler { readingFeatures.restoreChapterEdit(it) }
+        router.post("/reader3/getAlternateChapter").coroutineHandler { readingFeatures.getAlternateChapter(it) }
+        router.get("/reader3/getDictRules").coroutineHandler { readingFeatures.getDictRules(it) }
+        router.post("/reader3/saveDictRule").coroutineHandler { readingFeatures.saveDictRule(it) }
+        router.post("/reader3/deleteDictRule").coroutineHandler { readingFeatures.deleteDictRule(it) }
+        router.post("/reader3/lookupDictionary").coroutineHandler { readingFeatures.lookupDictionary(it) }
+        router.get("/reader3/getBookContentDetails").coroutineHandler { bookController.getBookContent(it, true) }
+        router.post("/reader3/getBookContentDetails").coroutineHandler { bookController.getBookContent(it, true) }
+
+        val advanced = AdvancedCapabilityController(coroutineContext, bookController)
+        val sourceActions = SourceActionController(coroutineContext, bookSourceController)
+        val subscriptions = com.htmake.reader.api.controller.SourceSubscriptionsController(coroutineContext, bookSourceController)
+        router.post("/reader3/getBookSourceSubscriptions").coroutineHandler { subscriptions.getBookSourceSubscriptions(it) }
+        router.post("/reader3/saveBookSourceSubscription").coroutineHandler { subscriptions.saveBookSourceSubscription(it) }
+        router.post("/reader3/deleteBookSourceSubscription").coroutineHandler { subscriptions.deleteBookSourceSubscription(it) }
+        router.post("/reader3/updateBookSourceSubscription").coroutineHandler { subscriptions.updateBookSourceSubscription(it) }
+        val sourceBrowser = SourceBrowserController(coroutineContext, bookSourceController)
+        router.post("/reader3/getSourceCapabilities").coroutineHandler { sourceActions.getSourceCapabilities(it) }
+        router.post("/reader3/checkBookSource").coroutineHandler { sourceActions.checkBookSource(it) }
+        router.post("/reader3/getSourceExploreUi").coroutineHandler { sourceActions.getSourceExploreUi(it) }
+        router.post("/reader3/applySourceExploreAction").coroutineHandler { sourceActions.applySourceExploreAction(it) }
+        router.post("/reader3/runSourceAction").coroutineHandler { sourceActions.runSourceAction(it) }
+        router.post("/reader3/drainSourceInteractions").coroutineHandler { sourceActions.drainSourceInteractions(it) }
+        router.post("/reader3/getSourceReviews").coroutineHandler { sourceActions.getSourceReviews(it) }
+        router.post("/reader3/decodeSourceImage").coroutineHandler { sourceActions.decodeSourceImage(it) }
+        router.post("/reader3/openSourceBrowser").coroutineHandler { sourceBrowser.open(it) }
+        router.post("/reader3/sourceBrowserAction").coroutineHandler { sourceBrowser.action(it) }
+        router.post("/reader3/closeSourceBrowser").coroutineHandler { sourceBrowser.close(it) }
+        router.get("/reader3/ai/config").coroutineHandler { advanced.getAiConfig(it) }
+        router.post("/reader3/ai/config").coroutineHandler { advanced.saveAiConfig(it) }
+        router.post("/reader3/ai/models").coroutineHandler { advanced.getAiModels(it) }
+        router.post("/reader3/ai/clean").coroutineHandler { advanced.cleanContent(it) }
+        router.get("/reader3/assistant/skills").coroutineHandler { advanced.getSkills(it) }
+        router.post("/reader3/assistant/skills").coroutineHandler { advanced.saveSkills(it) }
+        router.get("/reader3/ai/sessions").coroutineHandler { advanced.getAiSessions(it) }
+        router.get("/reader3/ai/session").coroutineHandler { advanced.getAiSession(it) }
+        router.post("/reader3/ai/deleteSession").coroutineHandler { advanced.deleteAiSession(it) }
+        router.get("/reader3/tts/config").coroutineHandler { advanced.getTtsConfig(it) }
+        router.post("/reader3/tts/config").coroutineHandler { advanced.saveTtsConfig(it) }
+        router.post("/reader3/tts/synthesize").coroutineHandler { advanced.synthesize(it) }
+        router.post("/reader3/reading/session").coroutineHandler { advanced.saveReadingSession(it) }
+        router.get("/reader3/reading/stats").coroutineHandler { advanced.getReadingStats(it) }
+        router.post("/reader3/ai/chatSSE").coroutineHandlerWithoutRes { advanced.chatSSE(it) }
+        router.post("/reader3/mcp").coroutineHandlerWithoutRes { advanced.mcp(it) }
+        router.get("/reader3/mcp").handler { it.response().setStatusCode(405).putHeader("Allow", "POST").end() }
+        router.get("/reader3/tts/audio/:id").coroutineHandlerWithoutRes { advanced.audio(it) }
+
 
         /** 书源模块 */
         router.post("/reader3/saveBookSource").coroutineHandler { bookSourceController.saveBookSource(it) }
         router.post("/reader3/saveBookSources").coroutineHandler { bookSourceController.saveBookSources(it) }
+        router.post("/reader3/parseBookSource").coroutineHandler { bookSourceController.parseBookSource(it) }
+        router.post("/reader3/getBookSourceLoginUi").coroutineHandler { bookSourceController.getBookSourceLoginUi(it) }
+        router.post("/reader3/loginBookSource").coroutineHandler { bookSourceController.loginBookSource(it) }
+        router.post("/reader3/getBookSourceCookies").coroutineHandler { bookSourceController.getBookSourceCookies(it) }
+        router.post("/reader3/saveBookSourceCookies").coroutineHandler { bookSourceController.saveBookSourceCookies(it) }
+        router.post("/reader3/clearBookSourceCookies").coroutineHandler { bookSourceController.clearBookSourceCookies(it) }
 
         router.get("/reader3/getBookSource").coroutineHandler { bookSourceController.getBookSource(it) }
         router.post("/reader3/getBookSource").coroutineHandler { bookSourceController.getBookSource(it) }
@@ -245,6 +317,7 @@ class YueduApi : RestVerticle() {
 
         // 调试书源
         router.get("/reader3/bookSourceDebugSSE").coroutineHandlerWithoutRes { bookController.bookSourceDebugSSE(it) }
+        router.post("/reader3/cancelBookSourceDebug").coroutineHandler { bookController.cancelBookSourceDebug(it) }
 
         // 缓存书籍章节
         router.get("/reader3/cacheBookSSE").coroutineHandlerWithoutRes { bookController.cacheBookSSE(it) }
@@ -256,6 +329,9 @@ class YueduApi : RestVerticle() {
         // 导出书籍
         router.post("/reader3/exportBook").coroutineHandlerWithoutRes { bookController.exportBook(it) }
         router.get("/reader3/exportBook").coroutineHandlerWithoutRes { bookController.exportBook(it) }
+        router.get("/reader3/getEpubTemplate").coroutineHandler { bookController.getEpubTemplate(it) }
+        router.post("/reader3/saveEpubTemplate").coroutineHandler { bookController.saveEpubTemplate(it) }
+        router.post("/reader3/deleteEpubTemplate").coroutineHandler { bookController.deleteEpubTemplate(it) }
 
         // 全文搜索
         router.get("/reader3/searchBookContent").coroutineHandler { bookController.searchBookContent(it) }
@@ -349,9 +425,9 @@ class YueduApi : RestVerticle() {
     }
 
     suspend fun setupPort() {
-        logger.info("port: {}", port)
+        logger.info { "port: ${port}" }
         var serverPort = env.getProperty("reader.server.port", Int::class.java)
-        logger.info("serverPort: {}", serverPort)
+        logger.info { "serverPort: ${serverPort}" }
         if (serverPort != null && serverPort > 0) {
             port = serverPort;
         }
@@ -378,17 +454,13 @@ class YueduApi : RestVerticle() {
         }
     }
 
-    override fun started() {
-        SpringContextUtils.getApplicationContext().publishEvent(SpringEvent(this as java.lang.Object, "READY", ""));
-    }
-
     override fun onStartError() {
-        SpringContextUtils.getApplicationContext().publishEvent(SpringEvent(this as java.lang.Object, "START_ERROR", "应用启动失败，请检查" + port + "端口是否被占用"));
+        logger.error { "应用启动失败，请检查${port}端口是否被占用" }
     }
 
     override fun onHandlerError(ctx: RoutingContext, error: Exception) {
         val returnData = ReturnData()
-        logger.error("onHandlerError: ", error)
+        logger.error(error) { "onHandlerError: " }
         if (!ctx.response().headWritten()) {
             ctx.success(returnData.setErrorMsg(error.toString()))
         } else {
@@ -424,7 +496,7 @@ class YueduApi : RestVerticle() {
             try {
                 val bookController = BookController(coroutineContext)
 
-                logger.info("开始检查书架书籍更新")
+                logger.info { "开始检查书架书籍更新" }
                 // 刷新系统默认书架
                 bookController.getBookShelfBooks(true, "default")
 
@@ -446,7 +518,7 @@ class YueduApi : RestVerticle() {
                         }
                     }
                 }
-                logger.info("书架书籍更新检查结束")
+                logger.info { "书架书籍更新检查结束" }
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -464,7 +536,7 @@ class YueduApi : RestVerticle() {
         }
         launch(Dispatchers.IO) {
             try {
-                logger.info("开始清理 {} 天未登录用户", appConfig.autoClearInactiveUser)
+                logger.info { "开始清理 ${appConfig.autoClearInactiveUser} 天未登录用户" }
 
                 var userMap = mutableMapOf<String, Map<String, Any>>()
                 var userMapJson: JsonObject? = asJsonObject(getStorage("data", "users"))
@@ -479,12 +551,12 @@ class YueduApi : RestVerticle() {
                             var username = user.getOrDefault("username", "") as String? ?: ""
                             var last_login_at = user.getOrDefault("last_login_at", 0) as Long? ?: 0L
                             if (username.isNotEmpty() && last_login_at < expireTime) {
-                                logger.info("delete user: {}", user)
+                                logger.info { "delete user: ${user}" }
                                 // 删除用户信息
                                 userMap.remove(username)
                                 // 移除用户目录
                                 var userHome = File(getWorkDir("storage", "data", username))
-                                logger.info("delete userHome: {}", userHome)
+                                logger.info { "delete userHome: ${userHome}" }
                                 if (userHome.exists()) {
                                     userHome.deleteRecursively()
                                 }
@@ -494,7 +566,7 @@ class YueduApi : RestVerticle() {
                         e.printStackTrace()
                     }
                 }
-                logger.info("不活跃用户自动清理结束")
+                logger.info { "不活跃用户自动清理结束" }
             } catch (e: Exception) {
                 e.printStackTrace()
             }

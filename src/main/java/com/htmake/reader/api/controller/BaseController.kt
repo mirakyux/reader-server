@@ -12,7 +12,7 @@ import io.vertx.ext.web.Route
 import io.vertx.ext.web.Router
 import io.vertx.ext.web.RoutingContext
 import io.vertx.ext.web.handler.StaticHandler;
-import mu.KotlinLogging
+import io.github.oshai.kotlinlogging.KotlinLogging
 import com.htmake.reader.config.AppConfig
 import com.htmake.reader.config.BookConfig
 import io.legado.app.constant.DeepinkBookSource
@@ -20,6 +20,7 @@ import com.htmake.reader.utils.error
 import com.htmake.reader.utils.success
 import com.htmake.reader.utils.getStorage
 import com.htmake.reader.utils.saveStorage
+import com.htmake.reader.utils.storageTransaction
 import com.htmake.reader.utils.asJsonArray
 import com.htmake.reader.utils.asJsonObject
 import com.htmake.reader.utils.toDataClass
@@ -37,7 +38,6 @@ import com.htmake.reader.utils.jsonEncode
 import com.htmake.reader.utils.getRelativePath
 import com.htmake.reader.utils.getFileExtetion
 import com.htmake.reader.verticle.RestVerticle
-import com.htmake.reader.SpringEvent
 import org.springframework.stereotype.Component
 import io.vertx.core.json.JsonObject
 import io.vertx.core.json.JsonArray
@@ -232,6 +232,10 @@ open class BaseController(override val coroutineContext: CoroutineContext): Coro
         return saveStorage("data", userNameSpace, path, value = value)
     }
 
+    fun <T> userStorageTransaction(userNameSpace: String, path: String, action: () -> T): T =
+        if (userNameSpace.isEmpty()) storageTransaction("data", path, action = action)
+        else storageTransaction("data", userNameSpace, path, action = action)
+
     fun getUserInfoClass(username: String): User? {
         var user: User? = getUserInfoMap(username)?.toDataClass()
         return user
@@ -350,7 +354,7 @@ open class BaseController(override val coroutineContext: CoroutineContext): Coro
             if (resultCount / concurrentCount > loopCount) {
                 loopCount = resultCount / concurrentCount
                 costTime = System.currentTimeMillis() - loopStart
-                logger.info("Loop: {} concurrentCount: {} lastIndex: {} endIndex: {} costTime: {} ms deferredList size: {}", loopCount, croutineCount, lastIndex, endIndex, costTime, deferredList.size)
+                logger.info { "Loop: ${loopCount} concurrentCount: ${croutineCount} lastIndex: ${lastIndex} endIndex: ${endIndex} costTime: ${costTime} ms deferredList size: ${deferredList.size}" }
             }
 
             if (lastIndex >= endIndex - 1) {

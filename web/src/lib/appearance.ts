@@ -1,0 +1,51 @@
+import type { ReadingSettings } from '../types';
+import { defaultReadingSettings, normalizeReadingSettings, readSettings } from './reading';
+import { api, ApiError, resourceUrl } from './api';
+
+export interface ReadingAsset { id: string; name: string; url: string }
+export interface ReadingProfile { id: string; name: string; settings: ReadingSettings; builtIn?: boolean; defaultMode?: 'day' | 'night'; sourceTheme?: unknown }
+export interface AppearanceLibrary { version: 1; fonts: ReadingAsset[]; backgrounds: ReadingAsset[]; profiles: ReadingProfile[]; activeProfileId: string }
+const key = 'reader.appearance';
+const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+const stored = (name: string): unknown => { try { return JSON.parse(localStorage.getItem(name) || 'null'); } catch { return null; } };
+export const builtInProfiles = (): ReadingProfile[] => [{ id: 'day-default', name: '内置白天', settings: { ...defaultReadingSettings }, builtIn: true, defaultMode: 'day' }, { id: 'night-default', name: '内置黑夜', settings: { ...defaultReadingSettings, theme: 'night' }, builtIn: true, defaultMode: 'night' }];
+export function appearanceUrl(value: string): string { if (/^bg\//.test(value)) return new URL(`/${value}`, window.location.origin).toString(); return resourceUrl(value); }
+export function validateAssetUrl(value: string, image = false): string { const trimmed = value.trim(); if (!trimmed) return ''; const resolved = new URL(appearanceUrl(trimmed)); if (!['http:', 'https:'].includes(resolved.protocol) && !(image && /^data:image\//i.test(trimmed))) throw new Error('请输入 HTTP(S) 地址或阅读资源路径'); return trimmed; }
+const asset = (url: string, name?: string): ReadingAsset => { let label = url.split('/').pop() || url; try { label = decodeURIComponent(label); } catch { /* Retain literal names from older backups. */ } return { id: url, name: name || label, url }; };
+export function readAppearance(): AppearanceLibrary {
+  const raw = object(stored(key)); const old = object(stored('config')); const oldProfiles = stored('customConfigList');
+  const fonts = Array.isArray(raw.fonts) ? raw.fonts as ReadingAsset[] : Object.values(object(old.customFontsMap)).filter((url): url is string => typeof url === 'string').map((url) => asset(url));
+  const backgrounds = Array.isArray(raw.backgrounds) ? raw.backgrounds as ReadingAsset[] : (Array.isArray(old.customBGImgList) ? old.customBGImgList : []).filter((url): url is string => typeof url === 'string').map((url) => asset(url));
+  if (typeof old.contentBGImg === 'string' && old.contentBGImg && !backgrounds.some((item) => item.url === old.contentBGImg)) backgrounds.push(asset(old.contentBGImg));
+  const defaults = builtInProfiles(); const profiles: ReadingProfile[] = Array.isArray(raw.profiles) ? raw.profiles as ReadingProfile[] : Array.isArray(oldProfiles) ? oldProfiles.map((value) => { const profile = object(value); const name = String(profile.name || '旧阅读方案'); const builtIn = defaults.find((item) => item.name === name); return { id: builtIn?.id || `legacy:${name}`, name, settings: normalizeReadingSettings(profile), builtIn: !!builtIn, defaultMode: profile.configDefaultType === '白天默认' ? 'day' as const : profile.configDefaultType === '黑夜默认' ? 'night' as const : undefined }; }) : defaults;
+  for (const builtIn of defaults) if (!profiles.some((item) => item.id === builtIn.id)) profiles.unshift(builtIn);
+  for (const profile of profiles) { const settings = profile.settings; if (settings.customFontUrl && !fonts.some((item) => item.url === settings.customFontUrl)) fonts.push(asset(settings.customFontUrl, settings.customFontName)); if (settings.backgroundImage && !backgrounds.some((item) => item.url === settings.backgroundImage)) backgrounds.push(asset(settings.backgroundImage)); }
+  return { version: 1, fonts, backgrounds, profiles, activeProfileId: String(raw.activeProfileId || profiles.find((item) => item.name === old.customConfig)?.id || '') };
+}
+export function saveAppearance(value: AppearanceLibrary): void { localStorage.setItem(key, JSON.stringify(value)); }
+export function saveReadingSettings(value: ReadingSettings): void { localStorage.setItem('reader.settings', JSON.stringify(normalizeReadingSettings(value))); window.dispatchEvent(new Event('reader:preferences')); }
+export function readingBackup(): Record<string, unknown> { return { version: 1, readingSettings: readSettings(), appearance: readAppearance() }; }
+export function parseProfiles(value: unknown): ReadingProfile[] {
+  const raw = object(value); const list = Array.isArray(value) ? value : Array.isArray(raw.profiles) ? raw.profiles : Array.isArray(object(raw.appearance).profiles) ? object(raw.appearance).profiles as unknown[] : Array.isArray(raw.customConfigList) ? raw.customConfigList : [];
+  if (!list.length) throw new Error('文件中没有阅读配置方案');
+  return list.map((value) => { const item = object(value); if (typeof item.name !== 'string' || !item.name.trim() || (!item.settings && !('fontSize' in item || 'theme' in item))) throw new Error('阅读方案缺少名称或设置'); return { id: typeof item.id === 'string' && item.id ? item.id : `import:${item.name.trim()}`, name: item.name.trim(), settings: normalizeReadingSettings(item.settings || item), defaultMode: item.defaultMode === 'day' || item.defaultMode === 'night' ? item.defaultMode : undefined }; });
+}
+export function mergeProfiles(current: AppearanceLibrary, imported: ReadingProfile[]): AppearanceLibrary { const profiles = [...current.profiles]; const fonts = [...current.fonts]; const backgrounds = [...current.backgrounds]; for (const item of imported) { const index = profiles.findIndex((previous) => previous.id === item.id || previous.name === item.name); if (index >= 0) profiles[index] = { ...profiles[index], ...item, id: profiles[index].id, builtIn: profiles[index].builtIn }; else profiles.push(item); if (item.settings.customFontUrl && !fonts.some((font) => font.url === item.settings.customFontUrl)) fonts.push(asset(validateAssetUrl(item.settings.customFontUrl), item.settings.customFontName)); if (item.settings.backgroundImage && !backgrounds.some((image) => image.url === item.settings.backgroundImage)) backgrounds.push(asset(validateAssetUrl(item.settings.backgroundImage, true))); } return { ...current, profiles, fonts, backgrounds }; }
+export function importReadingBackup(value: unknown): void {
+  const raw = object(value); const settings = raw.readingSettings || raw.reactReadingSettings || raw.config || ('fontSize' in raw || 'theme' in raw ? raw : undefined);
+  if (!settings) throw new Error('文件中没有阅读设置');
+  const appearance = object(raw.appearance || raw.reactAppearance); let library = readAppearance();
+  const old = object(raw.config); const oldFonts = Object.values(object(old.customFontsMap)).filter((value): value is string => typeof value === 'string'); const oldBackgrounds = (Array.isArray(old.customBGImgList) ? old.customBGImgList : []).filter((value): value is string => typeof value === 'string'); if (typeof old.contentBGImg === 'string' && old.contentBGImg) oldBackgrounds.push(old.contentBGImg); library.fonts = [...new Map([...library.fonts, ...oldFonts.map((url) => asset(validateAssetUrl(url)))].map((item) => [item.url, item])).values()]; library.backgrounds = [...new Map([...library.backgrounds, ...oldBackgrounds.map((url) => asset(validateAssetUrl(url, true)))].map((item) => [item.url, item])).values()];
+  if (Array.isArray(appearance.profiles) || Array.isArray(raw.customConfigList)) library = mergeProfiles(library, parseProfiles(appearance.profiles ? appearance : raw));
+  for (const type of ['fonts', 'backgrounds'] as const) if (Array.isArray(appearance[type])) { const entries = (appearance[type] as unknown[]).map((value) => object(value)).filter((item) => typeof item.url === 'string' && typeof item.name === 'string').map((item) => asset(validateAssetUrl(String(item.url), type === 'backgrounds'), String(item.name))); library[type] = [...new Map([...library[type], ...entries].map((item) => [item.url, item])).values()]; }
+  if (typeof appearance.activeProfileId === 'string' && library.profiles.some((item) => item.id === appearance.activeProfileId)) library.activeProfileId = appearance.activeProfileId;
+  saveAppearance(library); saveReadingSettings(normalizeReadingSettings(settings));
+}
+export async function backupReadingPreferences(): Promise<void> { let old: Record<string, unknown> = {}; try { old = await api.get<Record<string, unknown>>('getUserConfig'); } catch (error) { if (!(error instanceof ApiError) || !error.message.includes('没有备份文件')) throw error; } const legacy: Record<string, unknown> = {}; for (const name of ['config', 'customConfigList', 'speechVoiceConfig', 'shelfConfig', 'searchConfig']) { const value = stored(name); if (value !== null) legacy[name] = value; } await api.post('saveUserConfig', { ...legacy, ...old, reactReadingSettings: readSettings(), reactAppearance: readAppearance() }); }
+const fontLoads = new WeakMap<Document, Map<string, Promise<string>>>();
+export async function loadReadingFont(url: string, target = document): Promise<string> {
+  const resolved = appearanceUrl(validateAssetUrl(url)); let loads = fontLoads.get(target); if (!loads) { loads = new Map(); fontLoads.set(target, loads); } const previous = loads.get(resolved); if (previous) return previous;
+  const family = `ReaderCustom_${Array.from(resolved).reduce((hash, character) => (Math.imul(hash, 31) + character.charCodeAt(0)) >>> 0, 0).toString(16)}`;
+  const loading = new FontFace(family, `url(${JSON.stringify(resolved)})`).load().then((face) => { target.fonts.add(face); return family; }).catch((error) => { loads!.delete(resolved); throw error; }); loads.set(resolved, loading); return loading;
+}
+export const readingTheme = (settings: ReadingSettings) => { const theme = { paper: { background: '#f5f0e6', color: '#39362f' }, white: { background: '#ffffff', color: '#292929' }, night: { background: '#161d1a', color: '#c9d0c9' }, green: { background: '#e6eee5', color: '#304131' } }[settings.theme]; return { background: settings.customBackgroundColor || theme.background, color: settings.customTextColor || theme.color }; };

@@ -5,7 +5,7 @@ import io.legado.app.data.entities.BookChapter
 import io.legado.app.model.webBook.WebBook
 import io.legado.app.utils.isAbsUrl
 import io.legado.app.utils.HtmlFormatter
-import mu.KotlinLogging
+import io.github.oshai.kotlinlogging.KotlinLogging
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.Date
@@ -34,7 +34,7 @@ class Debugger(val logMsg: (String) -> Unit) : DebugLog {
         isHtml: Boolean
     ) {
         if (sourceUrl == null || msg == null) return
-        logger.info("sourceUrl: {}, msg: {}", sourceUrl, msg)
+        logger.info { "sourceUrl: ${sourceUrl}, msg: ${msg}" }
         var printMsg = msg
 
         if (isHtml) {

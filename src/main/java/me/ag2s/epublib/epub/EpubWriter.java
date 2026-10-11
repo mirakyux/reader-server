@@ -7,6 +7,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.Writer;
+import java.nio.charset.StandardCharsets;
 import java.util.zip.CRC32;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -42,13 +43,13 @@ public class EpubWriter {
 
   public void write(EpubBook book, OutputStream out) throws IOException {
     book = processBook(book);
-    ZipOutputStream resultStream = new ZipOutputStream(out);
-    writeMimeType(resultStream);
-    writeContainer(resultStream);
-    initTOCResource(book);
-    writeResources(book, resultStream);
-    writePackageDocument(book, resultStream);
-    resultStream.close();
+    try (ZipOutputStream resultStream = new ZipOutputStream(out)) {
+      writeMimeType(resultStream);
+      writeContainer(resultStream);
+      initTOCResource(book);
+      writeResources(book, resultStream);
+      writePackageDocument(book, resultStream);
+    }
   }
 
   private EpubBook processBook(EpubBook book) {
@@ -58,7 +59,7 @@ public class EpubWriter {
     return book;
   }
 
-  private void initTOCResource(EpubBook book) {
+  private void initTOCResource(EpubBook book) throws IOException {
     Resource tocResource;
     try {
       if (book.isEpub3()) {
@@ -74,15 +75,12 @@ public class EpubWriter {
       book.getSpine().setTocResource(tocResource);
       book.getResources().add(tocResource);
     } catch (Exception e) {
-      e.printStackTrace();
-      // Log.e(TAG,
-      //     "Error writing table of contents: "
-      //         + ex.getClass().getName() + ": " + ex.getMessage(), ex);
+      throw new IOException("无法生成 EPUB 目录", e);
     }
   }
 
 
-  private void writeResources(EpubBook book, ZipOutputStream resultStream) {
+  private void writeResources(EpubBook book, ZipOutputStream resultStream) throws IOException {
     for (Resource resource : book.getResources().getAll()) {
       writeResource(resource, resultStream);
     }
@@ -94,20 +92,15 @@ public class EpubWriter {
    * @param resource resource
    * @param  resultStream resultStream
    */
-  private void writeResource(Resource resource, ZipOutputStream resultStream) {
+  private void writeResource(Resource resource, ZipOutputStream resultStream) throws IOException {
     if (resource == null) {
       return;
     }
-    try {
-      resultStream.putNextEntry(new ZipEntry("OEBPS/" + resource.getHref()));
-      InputStream inputStream = resource.getInputStream();
-
+    resultStream.putNextEntry(new ZipEntry("OEBPS/" + resource.getHref()));
+    try (InputStream inputStream = resource.getInputStream()) {
       IOUtil.copy(inputStream, resultStream);
-      inputStream.close();
-    } catch (Exception e) {
-      e.printStackTrace();
-      // Log.e(TAG,e.getMessage(), e);
     }
+    resultStream.closeEntry();
   }
 
 
@@ -130,7 +123,7 @@ public class EpubWriter {
    */
   private void writeContainer(ZipOutputStream resultStream) throws IOException {
     resultStream.putNextEntry(new ZipEntry("META-INF/container.xml"));
-    Writer out = new OutputStreamWriter(resultStream);
+    Writer out = new OutputStreamWriter(resultStream, StandardCharsets.UTF_8);
     out.write("<?xml version=\"1.0\"?>\n");
     out.write(
         "<container version=\"1.0\" xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\">\n");
@@ -151,7 +144,7 @@ public class EpubWriter {
   private void writeMimeType(ZipOutputStream resultStream) throws IOException {
     ZipEntry mimetypeZipEntry = new ZipEntry("mimetype");
     mimetypeZipEntry.setMethod(ZipEntry.STORED);
-    byte[] mimetypeBytes = MediaTypes.EPUB.getName().getBytes();
+    byte[] mimetypeBytes = MediaTypes.EPUB.getName().getBytes(StandardCharsets.US_ASCII);
     mimetypeZipEntry.setSize(mimetypeBytes.length);
     mimetypeZipEntry.setCrc(calculateCrc(mimetypeBytes));
     resultStream.putNextEntry(mimetypeZipEntry);

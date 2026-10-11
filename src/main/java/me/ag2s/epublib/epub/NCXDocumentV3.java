@@ -395,7 +395,7 @@ public class NCXDocumentV3 {
     private static void writeNavPointStart(TOCReference tocReference, XmlSerializer serializer) throws IOException {
         writeLiStart(serializer);
         String title = tocReference.getTitle();
-        String href = tocReference.getCompleteHref();
+        String href = StringUtil.encodeHref(tocReference.getResource().getHref(), tocReference.getFragmentId());
         if (StringUtil.isNotBlank(href)) {
             writeLabel(title, href, serializer);
         } else {

@@ -20,5 +20,9 @@ data class ReplaceRule(
     @get:JsonProperty("isEnabled") var isEnabled: Boolean = true,
     @get:JsonProperty("isRegex") var isRegex: Boolean = false,
 //    @ColumnInfo(name = "sortOrder")
-    var order: Int = 0
+    var order: Int = 0,
+    var scopeTitle: Boolean = false,
+    var scopeContent: Boolean = true,
+    var excludeScope: String? = null,
+    var timeoutMillisecond: Long = 3000
 )

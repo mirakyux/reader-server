@@ -1,0 +1,8 @@
+.settings-sections { gap: 1.25rem; min-width: 0; }
+.settings-tabs { display: flex; flex-wrap: wrap; width: 100%; height: auto !important; justify-content: flex-start; gap: .25rem; padding: .375rem; }
+.settings-tabs [role=tab] { flex: 0 1 auto; min-height: 2.5rem; padding-inline: 1rem; }
+.settings-cache { display: grid; gap: 1.25rem; }
+@media (max-width: 600px) {
+  .settings-tabs [role=tab] { flex: 1 1 auto; padding-inline: .625rem; }
+  .settings-sections .settings-grid { grid-template-columns: minmax(0, 1fr); }
+}

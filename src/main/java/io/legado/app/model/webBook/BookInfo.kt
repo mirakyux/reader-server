@@ -118,6 +118,11 @@ object BookInfo {
             debugLog?.log(bookSource.bookSourceUrl, "└${e.localizedMessage}")
         }
         debugLog?.log(bookSource.bookSourceUrl, "┌获取目录链接")
+        if (bookSource.bookSourceType == 3) {
+            book.downloadUrls = analyzeRule.getStringList(infoRule.downloadUrls, isUrl = true)?.filter { it.isNotBlank() }?.distinct()
+            require(!book.downloadUrls.isNullOrEmpty()) { "文件书源下载链接为空" }
+            return
+        }
         book.tocUrl = analyzeRule.getString(infoRule.tocUrl, isUrl = true)
         if (book.tocUrl.isEmpty()) book.tocUrl = baseUrl
         if (book.tocUrl == baseUrl) {

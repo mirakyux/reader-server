@@ -1,0 +1,4 @@
+import { expect, it } from 'vitest';
+import { speechBatches, speechSegments } from '../src/lib/speech';
+it('retains roles while splitting long text and batching within backend size limits', () => { const segments = speechSegments('主角：' + '台词'.repeat(18000) + '\n旁白正文。'); expect(segments[0].role).toBe('主角'); expect(segments.at(-1)?.role).toBe('旁白'); const batches = speechBatches(segments); expect(batches.length).toBeGreaterThan(1); expect(batches.every((batch) => batch.length <= 40 && batch.reduce((sum, segment) => sum + segment.text.length, 0) <= 20000)).toBe(true); expect(batches.flat().map((segment) => segment.text).join('')).toBe('台词'.repeat(18000) + '旁白正文。'); });
+it('rejects oversized edited segments and omits empty paragraphs', () => { expect(() => speechBatches([{ text: '字'.repeat(4001) }])).toThrow('4000'); expect(speechBatches([{ text: ' ' }, { text: '正文' }])).toEqual([[{ text: '正文' }]]); });

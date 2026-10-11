@@ -18,7 +18,7 @@ import java.nio.charset.Charset
 import java.nio.file.Paths
 import java.util.*
 import java.util.zip.ZipFile
-import mu.KotlinLogging
+import io.github.oshai.kotlinlogging.KotlinLogging
 private val logger = KotlinLogging.logger {}
 
 class EpubFile(var book: Book) {
@@ -46,31 +46,31 @@ class EpubFile(var book: Book) {
             val epubFile = getEFile(book)
             return when (book.tocUrl) {
                 "toc" -> {
-                    logger.info("epubFile.getChapterList")
+                    logger.info { "epubFile.getChapterList" }
                     epubFile.getChapterList()
                 }
                 "spin" -> {
-                    logger.info("epubFile.getChapterListBySpine")
+                    logger.info { "epubFile.getChapterListBySpine" }
                     epubFile.getChapterListBySpine()
                 }
                 "spin<toc" -> {
-                    logger.info("epubFile.getChapterListBySpinAndToc true")
+                    logger.info { "epubFile.getChapterListBySpinAndToc true" }
                     epubFile.getChapterListBySpinAndToc(true)
                 }
                 "spin+toc" -> {
-                    logger.info("epubFile.getChapterListBySpinAndToc")
+                    logger.info { "epubFile.getChapterListBySpinAndToc" }
                     epubFile.getChapterListBySpinAndToc()
                 }
                 "toc+spin" -> {
-                    logger.info("epubFile.getChapterListByTocAndSpin")
+                    logger.info { "epubFile.getChapterListByTocAndSpin" }
                     epubFile.getChapterListByTocAndSpin()
                 }
                 "toc<spin" -> {
-                    logger.info("epubFile.getChapterListByTocAndSpin true")
+                    logger.info { "epubFile.getChapterListByTocAndSpin true" }
                     epubFile.getChapterListByTocAndSpin(true)
                 }
                 else -> {
-                    logger.info("epubFile.getChapterListBySpinAndToc")
+                    logger.info { "epubFile.getChapterListBySpinAndToc" }
                     epubFile.getChapterListBySpinAndToc()
                 }
             }

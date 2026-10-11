@@ -11,4 +11,4 @@ data class ExploreRule(
     override var bookUrl: String? = null,
     override var coverUrl: String? = null,
     override var wordCount: String? = null
-) : BookListRule
+) : io.legado.app.help.source.SourceFields(), BookListRule

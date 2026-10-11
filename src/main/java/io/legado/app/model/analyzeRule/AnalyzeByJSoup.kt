@@ -2,6 +2,7 @@ package io.legado.app.model.analyzeRule
 
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
+import org.jsoup.parser.Parser
 import org.jsoup.select.Collector
 import org.jsoup.select.Elements
 import org.jsoup.select.Evaluator
@@ -23,7 +24,9 @@ class AnalyzeByJSoup(doc: Any) {
             return when (doc) {
                 is Element -> doc
                 is JXNode -> if (doc.isElement) doc.asElement() else Jsoup.parse(doc.toString())
-                else -> Jsoup.parse(doc.toString())
+                else -> if (doc.toString().trimStart().startsWith("<?xml", true)) {
+                    Jsoup.parse(doc.toString(), Parser.xmlParser())
+                } else Jsoup.parse(doc.toString())
             }
         }
 
@@ -317,23 +320,21 @@ class AnalyzeByJSoup(doc: Any) {
                 if (indexes[ix] is Triple<*, *, *>) { //区间
                     val (startX, endX, stepX) = indexes[ix] as Triple<Int?, Int?, Int> //还原储存时的类型
 
-                    val start = if (startX == null) 0 //左端省略表示0
-                    else if (startX >= 0) if (startX < len) startX else len - 1 //右端越界，设置为最大索引
-                    else if (-startX <= len) len + startX /* 将负索引转正 */ else 0 //左端越界，设置为最小索引
+                    var start = startX ?: 0
+                    var end = endX ?: (len - 1)
+                    if (start < 0) start += len
+                    if (end < 0) end += len
+                    if (len == 0 || (start < 0 && end < 0) || (start >= len && end >= len)) continue
+                    start = start.coerceIn(0, len - 1)
+                    end = end.coerceIn(0, len - 1)
 
-                    val end = if (endX == null) len - 1 //右端省略表示 len - 1
-                    else if (endX >= 0) if (endX < len) endX else len - 1 //右端越界，设置为最大索引
-                    else if (-endX <= len) len + endX /* 将负索引转正 */ else 0 //左端越界，设置为最小索引
-
-                    if (start == end || stepX >= len) { //两端相同，区间里只有一个数。或间隔过大，区间实际上仅有首位
+                    val step = kotlin.math.abs(stepX.toLong()).coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
+                    if (start == end || step >= len) { //两端相同，区间里只有一个数。或间隔过大，区间实际上仅有首位
 
                         indexSet.add(start)
                         continue
 
                     }
-
-                    val step =
-                        if (stepX > 0) stepX else if (-stepX < len) stepX + len else 1 //最小正数间隔为1
 
                     //将区间展开到集合中,允许列表反向。
                     indexSet.addAll(if (end > start) start..end step step else start downTo end step step)
@@ -354,9 +355,9 @@ class AnalyzeByJSoup(doc: Any) {
              * */
             if (split == '!') { //排除
 
-                for (pcInt in indexSet) elements[pcInt] = null
-
-                elements.removeAll(listOf(null)) //测试过，这样就行
+                // Jsoup Elements.removeAt also removes nodes from the underlying document.
+                // Selection must leave the document intact for later rules on the same book.
+                elements = Elements(elements.filterIndexed { index, _ -> index !in indexSet })
 
             } else if (split == '.') { //选择
 
@@ -419,7 +420,7 @@ class AnalyzeByJSoup(doc: Any) {
                                         Triple(
                                             curInt,
                                             curList.last(),
-                                            if (curList.size == 2) curList.first() else 1
+                                            if (curList.size == 2) curList.first() ?: 1 else 1
                                         )
                                     )
 

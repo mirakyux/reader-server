@@ -6,13 +6,15 @@ import io.legado.app.data.entities.BookSource
 import io.legado.app.data.entities.SearchBook
 import io.legado.app.help.http.StrResponse
 import io.legado.app.model.analyzeRule.AnalyzeUrl
+import io.legado.app.model.analyzeRule.AnalyzeRule
+import io.legado.app.model.analyzeRule.getCheckedResponse
 import io.legado.app.model.webBook.BookChapterList
 import io.legado.app.model.webBook.BookContent
 import io.legado.app.model.webBook.BookInfo
 import io.legado.app.model.webBook.BookList
 import io.legado.app.model.Debug
 import io.legado.app.model.DebugLog
-import mu.KotlinLogging
+import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -20,9 +22,13 @@ import kotlinx.coroutines.withContext
 
 private val logger = KotlinLogging.logger {}
 
-class WebBook(val bookSource: BookSource, val debugLog: Boolean = true, var debugLogger: DebugLog? = null) {
+class WebBook(val bookSource: BookSource, val debugLog: Boolean = true, var debugLogger: DebugLog? = null, userNameSpace: String = "default") {
 
-    constructor(bookSourceString: String, debugLog: Boolean = true) : this(BookSource.fromJson(bookSourceString).getOrNull() ?: BookSource(), debugLog)
+    constructor(bookSourceString: String, debugLog: Boolean = true, userNameSpace: String = "default") : this(BookSource.fromJson(bookSourceString, userNameSpace).getOrThrow(), debugLog, userNameSpace = userNameSpace)
+
+    init { bookSource.runtimeUserNamespace = userNameSpace }
+
+    private val jsBook get() = io.legado.app.model.jsSource.JsSourceBook(bookSource, debugger)
 
     val sourceUrl: String
         get() = bookSource.bookSourceUrl
@@ -45,6 +51,7 @@ class WebBook(val bookSource: BookSource, val debugLog: Boolean = true, var debu
         key: String,
         page: Int? = 1
     ): List<SearchBook> {
+        if (!bookSource.mainJs.isNullOrBlank()) return withContext(Dispatchers.IO) { jsBook.search(key, page) }
         val variableBook = SearchBook()
         return bookSource.searchUrl?.let { searchUrl ->
             val analyzeUrl = AnalyzeUrl(
@@ -56,13 +63,7 @@ class WebBook(val bookSource: BookSource, val debugLog: Boolean = true, var debu
                 ruleData = variableBook,
                 headerMapF = bookSource.getHeaderMap(true),
             )
-            var res = analyzeUrl.getStrResponseAwait(debugLog = debugger)
-            //检测书源是否已登录
-            bookSource.loginCheckJs?.let { checkJs ->
-                if (checkJs.isNotBlank()) {
-                    res = analyzeUrl.evalJS(checkJs, res) as StrResponse
-                }
-            }
+            val res = analyzeUrl.getCheckedResponse(debugLog = debugger)
             BookList.analyzeBookList(
                 res.body,
                 bookSource,
@@ -87,6 +88,7 @@ class WebBook(val bookSource: BookSource, val debugLog: Boolean = true, var debu
         url: String,
         page: Int? = 1
     ): List<SearchBook> {
+        if (!bookSource.mainJs.isNullOrBlank()) return withContext(Dispatchers.IO) { jsBook.explore(url, page) }
         val variableBook = SearchBook()
         val analyzeUrl = AnalyzeUrl(
             mUrl = url,
@@ -96,13 +98,7 @@ class WebBook(val bookSource: BookSource, val debugLog: Boolean = true, var debu
             ruleData = variableBook,
             headerMapF = bookSource.getHeaderMap(true)
         )
-        var res = analyzeUrl.getStrResponseAwait(debugLog = debugger)
-        //检测书源是否已登录
-        bookSource.loginCheckJs?.let { checkJs ->
-            if (checkJs.isNotBlank()) {
-                res = analyzeUrl.evalJS(checkJs, result = res) as StrResponse
-            }
-        }
+        val res = analyzeUrl.getCheckedResponse(debugLog = debugger)
         return BookList.analyzeBookList(
             res.body,
             bookSource,
@@ -118,6 +114,7 @@ class WebBook(val bookSource: BookSource, val debugLog: Boolean = true, var debu
      * 书籍信息
      */
     suspend fun getBookInfo(book: Book, canReName: Boolean = true): Book {
+        if (!bookSource.mainJs.isNullOrBlank()) return withContext(Dispatchers.IO) { jsBook.info(book, canReName) }
         book.type = bookSource.bookSourceType
         if (!book.infoHtml.isNullOrEmpty()) {
             BookInfo.analyzeBookInfo(
@@ -144,6 +141,7 @@ class WebBook(val bookSource: BookSource, val debugLog: Boolean = true, var debu
         book.originName = bookSource.bookSourceName
         book.originOrder = bookSource.customOrder
         book.type = bookSource.bookSourceType
+        if (!bookSource.mainJs.isNullOrBlank()) return withContext(Dispatchers.IO) { jsBook.info(book, canReName) }
         val analyzeUrl = AnalyzeUrl(
             mUrl = book.bookUrl,
             baseUrl = bookSource.bookSourceUrl,
@@ -151,13 +149,7 @@ class WebBook(val bookSource: BookSource, val debugLog: Boolean = true, var debu
             ruleData = book,
             headerMapF = bookSource.getHeaderMap(true)
         )
-        var res = analyzeUrl.getStrResponseAwait(debugLog = debugger)
-        //检测书源是否已登录
-        bookSource.loginCheckJs?.let { checkJs ->
-            if (checkJs.isNotBlank()) {
-                res = analyzeUrl.evalJS(checkJs, result = res) as StrResponse
-            }
-        }
+        val res = analyzeUrl.getCheckedResponse(debugLog = debugger)
 
         BookInfo.analyzeBookInfo(book, res.body, bookSource, book.bookUrl, res.url, canReName, debugLog = debugger)
         book.tocHtml = null
@@ -168,8 +160,14 @@ class WebBook(val bookSource: BookSource, val debugLog: Boolean = true, var debu
      * 目录
      */
     suspend fun getChapterList(
-        book: Book
+        book: Book,
+        isFromBookInfo: Boolean = false
     ): List<BookChapter> {
+        require(bookSource.bookSourceType != 3) { "文件书源请使用 downloadUrls 下载，不提供目录" }
+        if (!bookSource.mainJs.isNullOrBlank()) return withContext(Dispatchers.IO) { jsBook.chapters(book) }
+        bookSource.getTocRule().preUpdateJs?.takeIf { it.isNotBlank() }?.let {
+            AnalyzeRule(book, bookSource, preUpdateJs = true, isFromBookInfo = isFromBookInfo).evalJS(it, null)
+        }
         book.type = bookSource.bookSourceType
         return if (book.bookUrl == book.tocUrl && !book.tocHtml.isNullOrEmpty()) {
             BookChapterList.analyzeChapterList(
@@ -177,7 +175,8 @@ class WebBook(val bookSource: BookSource, val debugLog: Boolean = true, var debu
                 book.tocHtml,
                 bookSource,
                 book.tocUrl,
-                book.tocUrl
+                book.tocUrl,
+                isFromBookInfo = isFromBookInfo
             )
         } else {
             val analyzeUrl = AnalyzeUrl(
@@ -187,14 +186,9 @@ class WebBook(val bookSource: BookSource, val debugLog: Boolean = true, var debu
                 ruleData = book,
                 headerMapF = bookSource.getHeaderMap(true)
             )
-            var res = analyzeUrl.getStrResponseAwait(debugLog = debugger)
-            //检测书源是否已登录
-            bookSource.loginCheckJs?.let { checkJs ->
-                if (checkJs.isNotBlank()) {
-                    res = analyzeUrl.evalJS(checkJs, result = res) as StrResponse
-                }
-            }
-            return BookChapterList.analyzeChapterList(book, res.body, bookSource, book.tocUrl, res.url, debugLog = debugger)
+            val res = analyzeUrl.getCheckedResponse(debugLog = debugger)
+            return BookChapterList.analyzeChapterList(book, res.body, bookSource, book.tocUrl, res.url,
+                debugLog = debugger, isFromBookInfo = isFromBookInfo)
         }
     }
 
@@ -207,6 +201,8 @@ class WebBook(val bookSource: BookSource, val debugLog: Boolean = true, var debu
         // bookChapterUrl:String,
         nextChapterUrl: String? = null
     ): String {
+        require(bookSource.bookSourceType != 3) { "文件书源请使用 downloadUrls 下载，不提供正文" }
+       if (!bookSource.mainJs.isNullOrBlank()) return withContext(Dispatchers.IO) { jsBook.content(book, bookChapter, nextChapterUrl) }
        if (bookSource.getContentRule().content.isNullOrEmpty()) {
             debugger?.log(bookSource.bookSourceUrl, "⇒正文规则为空,使用章节链接: ${bookChapter.url}")
             return bookChapter.url
@@ -218,7 +214,7 @@ class WebBook(val bookSource: BookSource, val debugLog: Boolean = true, var debu
 //        val body = if (book != null && bookChapter.url == book.bookUrl && !book.tocHtml.isNullOrEmpty()) {
 //            book.tocHtml
 //        } else {
-        logger.info("bookChapterUrl: {}", bookChapter.url, bookChapter.getAbsoluteURL())
+        logger.info { "bookChapterUrl: ${bookChapter.url} ${bookChapter.getAbsoluteURL()}" }
         val analyzeUrl = AnalyzeUrl(
             mUrl = bookChapter.getAbsoluteURL(),
             baseUrl = book.tocUrl,
@@ -227,7 +223,7 @@ class WebBook(val bookSource: BookSource, val debugLog: Boolean = true, var debu
             chapter = bookChapter,
             headerMapF = bookSource.getHeaderMap(true)
         )
-        var res = analyzeUrl.getStrResponseAwait(
+        val res = analyzeUrl.getCheckedResponse(
             jsStr = bookSource.getContentRule().webJs,
             sourceRegex = bookSource.getContentRule().sourceRegex,
             debugLog = debugger

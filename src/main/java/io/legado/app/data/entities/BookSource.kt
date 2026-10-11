@@ -24,7 +24,7 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 //    tableName = "book_sources",
 //    indices = [(Index(value = ["bookSourceUrl"], unique = false))]
 //)
-@JsonIgnoreProperties("headerMap", "source")
+@JsonIgnoreProperties("headerMap", "source", "scriptCache", "storageNamespace", "userNamespace", "runtimeUserNamespace")
 data class BookSource(
     var bookSourceName: String = "",           // 名称
     var bookSourceGroup: String? = null,       // 分组
@@ -50,7 +50,27 @@ data class BookSource(
     var ruleContent: ContentRule? = null,            // 正文页规则
     var bookSourceComment: String? = null,           // 注释
     var respondTime: Long = 180000L,               // 响应时间，用于排序
-) : BaseSource {
+    override var jsLib: String? = null,
+    override var loginUi: String? = null,
+    override var enabledCookieJar: Boolean? = true,
+    var mainJs: String? = null,
+    var coverDecodeJs: String? = null,
+    var variableComment: String? = null,
+    var exploreScreen: String? = null,
+    var eventListener: Boolean = false,
+    var customButton: Boolean = false,
+    var ruleReview: ReviewRule? = null,
+) : io.legado.app.help.source.SourceFields(), BaseSource {
+    @Transient
+    @get:com.fasterxml.jackson.annotation.JsonIgnore
+    var runtimeUserNamespace: String = "default"
+
+    override fun getUserNamespace(): String = runtimeUserNamespace
+
+    fun getCheckKeyword(default: String = "我的") = ruleSearch?.checkKeyWord?.takeIf {
+        it.isNotBlank() && !it.contains("http") && !it.contains("::") && !it.contains("++") && !it.contains("--")
+    } ?: default
+
 //    @Ignore
 //    @IgnoredOnParcel
     private var searchRuleV: SearchRule? = null
@@ -171,8 +191,8 @@ data class BookSource(
 
     companion object {
 
-        fun fromJson(json: String): Result<BookSource> {
-            return SourceAnalyzer.jsonToBookSource(json)
+        fun fromJson(json: String, userNameSpace: String = "default"): Result<BookSource> {
+            return SourceAnalyzer.jsonToBookSource(json, userNameSpace)
         }
 
         fun fromJsonArray(json: String): Result<MutableList<BookSource>> {

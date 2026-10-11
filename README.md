@@ -1,55 +1,25 @@
 # reader
 
-阅读3服务器版，不需要手机。
+阅读服务端与独立 React 客户端。前端采用 React、TypeScript、Vite、shadcn/ui + Tailwind CSS；后端采用 Kotlin、Spring Boot、Vert.x，运行于 Java 21。
 
-> Fork 自 [hectorqin/reader](https://github.com/hectorqin/reader)，已合并社区 PR（#648 #653 #667 #668 #701）并持续维护。
+Windows 使用 `./dev.ps1 start`，Linux/macOS 分别运行 `./build.sh run` 和 `cd web && npm ci && npm run dev`。访问 `http://localhost:5173/`。Docker 使用 `docker compose up -d --build`，访问 `http://localhost:4396/`。
 
-## 功能
+前端输出 `web/dist/`；API 输出 `build/backend/libs/reader.jar`。两者独立构建、部署，不再把网页放进 JAR。旧数据目录和 API 保持兼容。
 
-书源管理、书架管理、搜索、书海、看书、移动端适配、换源、翻页方式、手势支持、自定义主题、WebDAV 同步、文字替换过滤、听书、漫画、音频、本地书导入（TXT/EPUB/UMD/PDF）、书籍分组、RSS 订阅、定时更新书架、并发搜书、本地书仓、Kindle 阅读。
+已对照 Legado NG 补齐书源执行、登录与校验、精确阅读位置、设备离线、RSS、查词、外观和 WebDAV 数据同步。AI／Skills／MCP 和听书入口默认隐藏。本地书解析暂不扩展，已有 TXT、EPUB、UMD、CBZ 功能保留。
 
-## Docker 部署
+单文件 JS 书源支持与 FU 同版本引擎的 QuickJS 桥；常规规则沿用 Rhino，安全 Java 包导入、共享缓存、jsLib、加密及字体桥按 FU 契约执行。动态场景不在本轮范围。
 
-```bash
-# 标准版（推荐）
-docker pull changshengyu/reader:latest
+在线文字书可缓存全部章节后导出 TXT 或 EPUB；支持进度、取消及失败章节重试，缺章时拒绝导出。
 
-# Slim 版
-# docker pull changshengyu/reader:slim-latest
+- [部署、启动与配置](docs/deployment.md)
+- [依赖升级与兼容说明](docs/dependency-upgrade.md)
+- [迁移计划与验证要求](docs/migration-plan.md)
+- [书源能力迁移](docs/book-source-migration.md)
+- [全章缓存与 TXT/EPUB 下载](docs/book-download-plan.md)
+- [迁移验收与剩余限制](docs/verification.md)
+- [FU 非 AI 功能补齐验收](docs/fu-parity-verification.md)
+- [FU 书源兼容补齐与验收](docs/source-compatibility-verification.md)
+- [数据目录及已有 API](doc.md)
 
-# OpenJ9 版（启动快、省内存）
-# docker pull changshengyu/reader:openj9-latest
-```
-
-```bash
-docker run -d \
-  --name reader \
-  -p 4396:8080 \
-  -v /home/reader/logs:/logs \
-  -v /home/reader/storage:/storage \
-  -e SPRING_PROFILES_ACTIVE=prod \
-  -e READER_APP_SECURE=true \
-  -e READER_APP_SECUREKEY=adminpwd \
-  -e READER_APP_INVITECODE=registercode \
-  changshengyu/reader:latest
-```
-
-或使用 docker-compose：
-
-```bash
-wget https://raw.githubusercontent.com/changshengyu/reader-dev/master/docker-compose.yaml
-docker-compose up -d
-```
-
-## 自行构建
-
-```bash
-docker build -f Dockerfile.source -t reader:latest .
-docker build -f Dockerfile.slim -t reader:slim-latest .
-docker build -f Dockerfile.openj9 -t reader:openj9-latest .
-```
-
-## 感谢
-
-- [hectorqin/reader](https://github.com/hectorqin/reader)
-- [阅读3.0](https://github.com/gedoor/legado)
+Fork 自 [hectorqin/reader](https://github.com/hectorqin/reader)，规则兼容参考 [Legado](https://github.com/gedoor/legado) 及本地 Legado NG。

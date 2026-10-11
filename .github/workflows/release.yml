@@ -1,76 +1,62 @@
-name: Publish Docker Multi-Platform Images
-
+name: Publish separate API and web images
 on:
-  # push:
-  #   tags:
-  #     - 'v**'
   workflow_dispatch:
-
+permissions:
+  contents: read
+  packages: write
 jobs:
-  docker:
-    if: github.repository == 'hectorqin/reader'
+  publish:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: api
+            context: .
+            dockerfile: Dockerfile.source
+            suffix: latest
+          - name: api
+            context: .
+            dockerfile: Dockerfile.openj9
+            suffix: openj9-latest
+          - name: api
+            context: .
+            dockerfile: Dockerfile.slim
+            suffix: slim-latest
+          - name: web
+            context: ./web
+            dockerfile: ./web/Dockerfile
+            suffix: latest
+          - name: browser
+            context: ./browser
+            dockerfile: ./browser/Dockerfile
+            suffix: latest
     steps:
-      -
-        name: Checkout
-        uses: actions/checkout@v2
-      -
-        name: Setup node
-        uses: actions/setup-node@v2
+      - uses: actions/checkout@v7.0.1
+      - name: Resolve registry image
+        id: image
+        env:
+          READER_REPOSITORY: ${{ github.repository }}
+        run: echo "name=ghcr.io/${READER_REPOSITORY,,}-${{ matrix.name }}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v4.4.0
+      - uses: docker/setup-buildx-action@v4.4.1
+      - uses: docker/login-action@v4.6.0
         with:
-          node-version: '14'
-      -
-        name: Build web
-        run: cd web && npm install && npm run build
-      -
-        name: Setup Java
-        uses: actions/setup-java@v2
-        with:
-          distribution: 'temurin'
-          java-version: '8'
-          cache: 'gradle'
-      -
-        name: Build Java
-        run:
-          mv ./web/dist ./src/main/resources/web && rm src/main/java/com/htmake/reader/ReaderUIApplication.kt && gradle -b cli.gradle assemble --info && mv ./build/libs/*.jar ./reader.jar
-      -
-        name: Docker meta
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v6.2.0
         id: meta
-        uses: docker/metadata-action@v3
         with:
-          # list of Docker images to use as base name for tags
-          images: |
-            hectorqin/reader-basic
-          # generate Docker tags based on the following events/attributes
-          tags: |
-            type=semver,pattern={{version}}
-            type=raw,value=latest,enable=${{ !contains(github.ref, 'beta') }}
-      -
-        name: Set up QEMU
-        uses: docker/setup-qemu-action@v1
-      -
-        name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v1
-      -
-        name: Login to DockerHub
-        uses: docker/login-action@v1
+          images: ${{ steps.image.outputs.name }}
+          tags: type=raw,value=${{ matrix.suffix }}
+      - uses: docker/build-push-action@v7.4.0
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-      -
-        name: Build and push
-        uses: docker/build-push-action@v2
-        with:
-          context: .
-          file: ./.github/workflows/Dockerfile
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: |
-            linux/amd64
-            linux/arm64
-            linux/arm/v6
-            linux/arm/v7
-            linux/386
-            linux/ppc64le
-            linux/s390x
+          cache-from: type=gha,scope=${{ matrix.name }}-${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}-${{ matrix.suffix }}

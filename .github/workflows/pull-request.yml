@@ -1,46 +1,61 @@
-name: Pull Request Check
-
+name: Verify API and React
 on:
   pull_request:
-    types: [synchronize, reopened, labeled]
-    branches:
-      - master
-
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+permissions:
+  contents: read
 concurrency:
-  group: ${{ github.head_ref }}
+  group: verify-${{ github.ref }}
   cancel-in-progress: true
-
-defaults:
-  run:
-    shell: bash
-
 jobs:
-  docker:
-    if: github.repository == 'hectorqin/reader'
+  api:
     runs-on: ubuntu-latest
     steps:
-      -
-        name: Checkout
-        uses: actions/checkout@v2
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-java@v6.0.1
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          clean: false
-      -
-        name: Setup node
-        uses: actions/setup-node@v2
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - run: chmod +x gradlew && ./gradlew --no-daemon test bootJar
+      - name: Verify independent API package
+        run: |
+          if jar tf build/backend/libs/reader.jar | grep -E 'BOOT-INF/classes/web/|javafx|ReaderUIApplication'; then
+            exit 1
+          fi
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
         with:
-          node-version: '14'
-      -
-        name: Build web
-        run: cd web && npm install && npm run build
-      -
-        name: Setup Java
-        uses: actions/setup-java@v2
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+  browser:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: browser
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
         with:
-          distribution: 'temurin'
-          java-version: '8'
-          cache: 'gradle'
-      -
-        name: Build Java
-        run:
-          mv ./web/dist ./src/main/resources/web && rm src/main/java/com/htmake/reader/ReaderUIApplication.kt && gradle -b cli.gradle assemble --info && mv ./build/libs/*.jar ./reader.jar
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: browser/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm test

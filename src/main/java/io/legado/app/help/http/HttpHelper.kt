@@ -59,14 +59,17 @@ val okHttpClient: OkHttpClient by lazy {
 /**
  * 缓存代理okHttp
  */
-fun getProxyClient(proxy: String? = null, debugLog: DebugLog? = null): OkHttpClient {
+private fun getBaseProxyClient(proxy: String? = null, debugLog: DebugLog? = null): OkHttpClient {
     if (proxy.isNullOrBlank()) {
         if (debugLog == null) {
             return okHttpClient
         }
         val builder = okHttpClient.newBuilder()
         val logInterceptor = HttpLoggingInterceptor(debugLog);//创建拦截对象
-        logInterceptor.setLevel(HttpLoggingInterceptor.Level.BODY);//这一句一定要记得写，否则没有数据输出
+        logInterceptor.setLevel(HttpLoggingInterceptor.Level.BODY)
+        logInterceptor.redactHeader("Cookie")
+        logInterceptor.redactHeader("Set-Cookie")
+        logInterceptor.redactHeader("Authorization")
 
         builder.addNetworkInterceptor(logInterceptor)  //设置打印拦截日志
         return builder.build()
@@ -116,7 +119,10 @@ fun getProxyClient(proxy: String? = null, debugLog: DebugLog? = null): OkHttpCli
         }
         if (debugLog != null) {
             val logInterceptor = HttpLoggingInterceptor(debugLog);//创建拦截对象
-            logInterceptor.setLevel(HttpLoggingInterceptor.Level.BODY);//这一句一定要记得写，否则没有数据输出
+            logInterceptor.setLevel(HttpLoggingInterceptor.Level.BODY)
+            logInterceptor.redactHeader("Cookie")
+            logInterceptor.redactHeader("Set-Cookie")
+            logInterceptor.redactHeader("Authorization")
 
             builder.addNetworkInterceptor(logInterceptor)  //设置打印拦截日志
             return builder.build()
@@ -126,6 +132,36 @@ fun getProxyClient(proxy: String? = null, debugLog: DebugLog? = null): OkHttpCli
         return proxyClient
     }
     return okHttpClient
+}
+
+fun getProxyClient(
+    proxy: String? = null,
+    debugLog: DebugLog? = null,
+    source: io.legado.app.data.entities.BaseSource? = null,
+    customCookie: String? = null,
+    cookieUrl: String? = null
+): OkHttpClient {
+    val base = getBaseProxyClient(proxy, debugLog)
+    if (source == null) return base
+    val store = CookieStore.forSource(source)
+    val originalHost = cookieUrl?.let { runCatching { java.net.URI(it).host }.getOrNull() }
+    return base.newBuilder().cookieJar(object : okhttp3.CookieJar {
+        override fun loadForRequest(url: okhttp3.HttpUrl) = store.loadForRequest(url)
+        override fun saveFromResponse(url: okhttp3.HttpUrl, cookies: List<okhttp3.Cookie>) {
+            if (source.enabledCookieJar != false) store.saveFromResponse(url, cookies)
+        }
+    }).apply {
+        if (!customCookie.isNullOrBlank()) addNetworkInterceptor { chain ->
+            var request = chain.request()
+            if (originalHost == request.url.host) {
+                val values = store.cookieToMap(request.header("Cookie").orEmpty()).apply {
+                    putAll(store.cookieToMap(customCookie))
+                }
+                request = request.newBuilder().header("Cookie", store.mapToCookie(values).orEmpty()).build()
+            }
+            chain.proceed(request)
+        }
+    }.build()
 }
 
 // suspend fun getWebViewSrc(params: AjaxWebView.AjaxParams): StrResponse =

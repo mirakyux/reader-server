@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.Reader;
 import java.io.UnsupportedEncodingException;
+import java.nio.charset.StandardCharsets;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -36,25 +37,19 @@ public class ResourceUtil {
      * @return 返回Resource
      */
     public static Resource createChapterResource(String title, String txt, String model, String href) {
-        if (title.contains("\n")) {
-            title = "<span class=\"chapter-sequence-number\">" + title.replaceFirst("\\s*\\n\\s*", "</span><br />");
-        } else {
-            title = title.replaceFirst("\\s+", "</span><br />");
-            if (title.contains("</span>"))
-                title = "<span class=\"chapter-sequence-number\">" + title;
-        }
-        String html = model.replace("{title}", title)
+        String html = model.replace("{title}", StringUtil.escapeXml(title))
+                .replace("{ori_title}", StringUtil.escapeXml(title))
                 .replace("{content}", StringUtil.formatHtml(txt));
-        return new Resource(html.getBytes(), href);
+        return new Resource(html.getBytes(StandardCharsets.UTF_8), href);
     }
 
     public static Resource createPublicResource(String name, String author, String intro, String kind, String wordCount, String model, String href) {
-        String html = model.replace("{name}", name)
-                .replace("{author}", author)
-                .replace("{kind}", kind == null ? "" : kind)
-                .replace("{wordCount}", wordCount == null ? "" : wordCount)
+        String html = model.replace("{name}", StringUtil.escapeXml(name))
+                .replace("{author}", StringUtil.escapeXml(author))
+                .replace("{kind}", StringUtil.escapeXml(kind))
+                .replace("{wordCount}", StringUtil.escapeXml(wordCount))
                 .replace("{intro}", StringUtil.formatHtml(intro == null ? "" : intro));
-        return new Resource(html.getBytes(), href);
+        return new Resource(html.getBytes(StandardCharsets.UTF_8), href);
     }
 
     /**
@@ -85,10 +80,11 @@ public class ResourceUtil {
      */
     @SuppressWarnings("unused")
     public static Resource createResource(String title, String href) {
+        String escapedTitle = StringUtil.escapeXml(title);
         String content =
-                "<html><head><title>" + title + "</title></head><body><h1>" + title
+                "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>" + escapedTitle + "</title></head><body><h1>" + escapedTitle
                         + "</h1></body></html>";
-        return new Resource(null, content.getBytes(), href, MediaTypes.XHTML,
+        return new Resource(null, content.getBytes(StandardCharsets.UTF_8), href, MediaTypes.XHTML,
                 Constants.CHARACTER_ENCODING);
     }
 

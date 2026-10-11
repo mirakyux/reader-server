@@ -1,6 +1,6 @@
 package io.legado.app.data.entities
 
-import com.script.SimpleBindings
+import javax.script.SimpleBindings
 import io.legado.app.utils.Base64
 import io.legado.app.constant.AppConst
 import io.legado.app.help.CacheManager
@@ -18,8 +18,24 @@ interface BaseSource : JsExtensions {
     var loginUrl: String?       // 登录地址
     // var loginUi: String?   // 登录UI
     var header: String?         // 请求头
+    var jsLib: String?
+        get() = null
+        set(value) {}
+    var loginUi: String?
+        get() = null
+        set(value) {}
+    var enabledCookieJar: Boolean?
+        get() = false
+        set(value) {}
 
-    fun getTag(): String
+    fun getUserNamespace(): String = "default"
+    fun getStorageNamespace(): String = io.legado.app.help.source.SourceStorage.namespace(getUserNamespace(), getKey())
+    fun getScriptCache() = io.legado.app.help.source.SourceCache(getStorageNamespace())
+
+    fun evalScript(script: String, bindings: Map<String, Any?> = emptyMap()): Any? =
+        io.legado.app.model.jsSource.SourceScriptRuntime.eval(this, script, bindings)
+
+    override fun getTag(): String
 
     fun getKey(): String
 
@@ -73,7 +89,7 @@ interface BaseSource : JsExtensions {
      * 获取用于登录的头部信息
      */
     fun getLoginHeader(): String? {
-        return CacheManager.get("loginHeader_${getKey()}")
+        return getScriptCache().get("loginHeader")
     }
 
     fun getLoginHeaderMap(): Map<String, String>? {
@@ -85,11 +101,11 @@ interface BaseSource : JsExtensions {
      * 保存登录头部信息,map格式,访问时自动添加
      */
     fun putLoginHeader(header: String) {
-        CacheManager.put("loginHeader_${getKey()}", header)
+        getScriptCache().put("loginHeader", header)
     }
 
     fun removeLoginHeader() {
-        CacheManager.delete("loginHeader_${getKey()}")
+        getScriptCache().delete("loginHeader")
     }
 
     /**
@@ -98,20 +114,41 @@ interface BaseSource : JsExtensions {
      */
     fun getLoginInfo(): String? {
         try {
-            val key = AppConst.userAgent.encodeToByteArray(0, 8)
-            val cache = CacheManager.get("userInfo_${getKey()}") ?: return null
-            val encodeBytes = EncoderUtils.base64Decode(cache, Base64.DEFAULT).toByteArray()
-            val decodeBytes = EncoderUtils.decryptAES(encodeBytes, key)
-                ?: return null
-            return String(decodeBytes)
+            return getScriptCache().get("loginInfo")?.let(io.legado.app.help.source.SourceSecrets::decrypt)
         } catch (e: Exception) {
             log("获取登陆信息出错 " + e.localizedMessage)
             return null
         }
     }
 
-    fun getLoginInfoMap(): Map<String, String>? {
-        return GSON.fromJsonObject<Map<String, String>>(getLoginInfo()).getOrNull()
+    fun getLoginInfoMap(): MutableMap<String, String> {
+        getLoginInfo()?.let { return GSON.fromJsonObject<MutableMap<String, String>>(it).getOrNull() ?: mutableMapOf() }
+        val ui = loginUi?.takeIf { it.isNotBlank() } ?: return mutableMapOf()
+        val json = when {
+            ui.startsWith("@js:") -> evalJS("${getLoginJs().orEmpty()}\n${ui.substring(4)}") {
+                put("result", mutableMapOf<String, String>()); put("book", null); put("chapter", null)
+            }.toString()
+            ui.startsWith("<js>") -> evalJS("${getLoginJs().orEmpty()}\n${ui.substring(4, ui.lastIndexOf('<'))}") {
+                put("result", mutableMapOf<String, String>()); put("book", null); put("chapter", null)
+            }.toString()
+            else -> ui
+        }
+        val defaults = runCatching {
+            val rows = com.google.gson.JsonParser.parseString(json)
+            if (!rows.isJsonArray) return@runCatching mutableMapOf<String, String>()
+            linkedMapOf<String, String>().apply {
+                rows.asJsonArray.forEach { value ->
+                    if (value.isJsonObject) {
+                        val row = value.asJsonObject
+                        if (row["type"]?.asString != "button") row["name"]?.takeUnless { it.isJsonNull }?.asString?.let { name ->
+                            put(name, row["default"]?.takeUnless { it.isJsonNull }?.asString ?: "")
+                        }
+                    }
+                }
+            }
+        }.getOrNull() ?: mutableMapOf()
+        if (defaults.isNotEmpty()) putLoginInfo(GSON.toJson(defaults))
+        return defaults
     }
 
     /**
@@ -119,10 +156,7 @@ interface BaseSource : JsExtensions {
      */
     fun putLoginInfo(info: String): Boolean {
         return try {
-            val key = (AppConst.userAgent).encodeToByteArray(0, 8)
-            val encodeBytes = EncoderUtils.encryptAES(info.toByteArray(), key)
-            val encodeStr = Base64.encodeToString(encodeBytes, Base64.DEFAULT)
-            CacheManager.put("userInfo_${getKey()}", encodeStr)
+            getScriptCache().put("loginInfo", io.legado.app.help.source.SourceSecrets.encrypt(info))
             true
         } catch (e: Exception) {
             log("保存登陆信息出错 " + e.localizedMessage)
@@ -131,19 +165,37 @@ interface BaseSource : JsExtensions {
     }
 
     fun removeLoginInfo() {
-        CacheManager.delete("userInfo_${getKey()}")
+        getScriptCache().delete("loginInfo")
     }
 
     fun setVariable(variable: String?) {
         if (variable != null) {
-            CacheManager.put("sourceVariable_${getKey()}", variable)
+            getScriptCache().put("sourceVariable", variable)
         } else {
-            CacheManager.delete("sourceVariable_${getKey()}")
+            getScriptCache().delete("sourceVariable")
         }
     }
 
-    fun getVariable(): String? {
-        return CacheManager.get("sourceVariable_${getKey()}")
+    fun putVariable(variable: String?) = setVariable(variable)
+
+    fun getVariable(): String = getScriptCache().get("sourceVariable") ?: ""
+
+    fun put(key: String, value: String): String {
+        getScriptCache().put("v_$key", value)
+        return value
+    }
+    fun get(key: String): String = getScriptCache().get("v_$key") ?: ""
+
+    /** Discovery is recalculated by the server; tell the caller to reload its controls. */
+    fun refreshExplore() { getScriptCache().put("exploreRefreshRequested", "true") }
+    fun refreshJSLib() { io.legado.app.model.jsSource.SourceScriptRuntime.invalidateLibrary(this) }
+
+    fun putConcurrent(value: String) {
+        val parts = value.split('/')
+        if ((parts.size == 1 || parts.size == 2) && parts.all { it.toIntOrNull()?.let { number -> number > 0 } == true }) {
+            concurrentRate = value
+            getScriptCache().put("concurrentRateOverride", value)
+        }
     }
 
     /**
@@ -156,8 +208,8 @@ interface BaseSource : JsExtensions {
         bindings["java"] = this
         bindings["source"] = this
         bindings["baseUrl"] = getKey()
-        bindings["cookie"] = CookieStore
-        bindings["cache"] = CacheManager
-        return AppConst.SCRIPT_ENGINE.eval(jsStr, bindings)
+        bindings["cookie"] = CookieStore.forSource(this)
+        bindings["cache"] = getScriptCache()
+        return evalScript(jsStr, bindings)
     }
 }

@@ -16,7 +16,7 @@ import io.vertx.ext.web.Route
 import io.vertx.ext.web.Router
 import io.vertx.ext.web.RoutingContext
 import io.vertx.ext.web.handler.StaticHandler;
-import mu.KotlinLogging
+import io.github.oshai.kotlinlogging.KotlinLogging
 import com.htmake.reader.config.AppConfig
 import com.htmake.reader.config.BookConfig
 import io.legado.app.constant.DeepinkBookSource
@@ -24,6 +24,8 @@ import com.htmake.reader.utils.error
 import com.htmake.reader.utils.success
 import com.htmake.reader.utils.getStorage
 import com.htmake.reader.utils.saveStorage
+import com.htmake.reader.utils.storageDirectory
+import com.htmake.reader.utils.getStoragePath
 import com.htmake.reader.utils.asJsonArray
 import com.htmake.reader.utils.asJsonObject
 import com.htmake.reader.utils.toDataClass
@@ -40,10 +42,10 @@ import com.htmake.reader.utils.zip
 import com.htmake.reader.utils.jsonEncode
 import com.htmake.reader.utils.getRelativePath
 import com.htmake.reader.verticle.RestVerticle
-import com.htmake.reader.SpringEvent
 import org.springframework.stereotype.Component
 import io.vertx.core.json.JsonObject
 import io.vertx.core.json.JsonArray
+import io.vertx.kotlin.coroutines.coAwait
 import io.vertx.core.http.HttpMethod
 import com.htmake.reader.api.ReturnData
 import io.legado.app.utils.MD5Utils
@@ -84,11 +86,16 @@ import kotlinx.coroutines.CoroutineScope
 import me.ag2s.epublib.domain.*
 import me.ag2s.epublib.epub.EpubWriter
 import me.ag2s.epublib.util.ResourceUtil
+import com.htmake.reader.api.service.EpubImages
+import com.htmake.reader.api.service.EpubTemplateStore
+import io.legado.app.model.jsSource.SourceActions
+import kotlinx.coroutines.CancellationException
 // import io.legado.app.help.coroutine.Coroutine
 
 private val logger = KotlinLogging.logger {}
 
 class BookController(coroutineContext: CoroutineContext): BaseController(coroutineContext) {
+    private val sourceDebugJobs = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Job>()
 
     var bookInfoCache = ACache.get("bookInfoCache", 1000 * 1000 * 2L, 10000) // 缓存 2M 的书籍信息
     val concurrentLoopCount = 8
@@ -100,7 +107,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
     }
 
     private fun getInvalidBookSourceCache(userNameSpace: String): ACache {
-        val cacheDir = File(getWorkDir("storage", "cache", "invalidBookSourceCache", userNameSpace))
+        val cacheDir = storageDirectory("cache", "invalidBookSourceCache", userNameSpace)
         // 缓存 5M 的失效书源信息
         var invalidBookSourceCache = ACache.get(cacheDir, 1000 * 1000 * 5L, 1000000)
         return invalidBookSourceCache
@@ -122,7 +129,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         }
         var userNameSpace = getUserNameSpace(context)
         val invalidBookSourceCache = getInvalidBookSourceCache(userNameSpace)
-        val cacheDir = File(getWorkDir("storage", "cache", "invalidBookSourceCache", userNameSpace))
+        val cacheDir = storageDirectory("cache", "invalidBookSourceCache", userNameSpace)
         val files = cacheDir.listFiles()
         val invalidBookSourceList = arrayListOf<Map<String, Any>>()
         if (files != null) {
@@ -141,7 +148,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var bookUrl: String
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            bookUrl = context.bodyAsJson.getString("url") ?: context.bodyAsJson.getJsonObject("searchBook").getString("bookUrl") ?: ""
+            bookUrl = context.body().asJsonObject().getString("url") ?: context.body().asJsonObject().getJsonObject("searchBook")?.getString("bookUrl") ?: ""
         } else {
             // get 请求
             bookUrl = context.queryParam("url").firstOrNull() ?: ""
@@ -149,7 +156,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         if (bookUrl.isNullOrEmpty()) {
             return returnData.setErrorMsg("请输入书籍链接")
         }
-        logger.info("getBookInfo with bookUrl: {}", bookUrl)
+        logger.info { "getBookInfo with bookUrl: ${bookUrl}" }
         var bookInfo: Book? = null
         if (checkAuth(context)) {
             bookInfo = getShelfBookByURL(bookUrl, getUserNameSpace(context))
@@ -167,7 +174,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             if (bookSource.isNullOrEmpty()) {
                 return returnData.setErrorMsg("未配置书源")
             }
-            bookInfo = mergeBookCacheInfo(WebBook(bookSource, appConfig.debugLog).getBookInfo(bookUrl))
+            bookInfo = mergeBookCacheInfo(WebBook(bookSource, appConfig.debugLog, userNameSpace = getUserNameSpace(context)).getBookInfo(bookUrl))
         }
 
         // 缓存书籍信息
@@ -183,10 +190,9 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         }
         var ext = getFileExt(coverUrl, "png")
         val md5Encode = MD5Utils.md5Encode(coverUrl).toString()
-        var cachePath = getWorkDir("storage", "cache", md5Encode + "." + ext)
-        var cacheFile = File(cachePath)
+        val cacheFile = File(storageDirectory("cache"), "$md5Encode.$ext")
         if (cacheFile.exists()) {
-            logger.info("send cache: {}", cacheFile)
+            logger.info { "send cache: ${cacheFile}" }
             context.response().putHeader("Cache-Control", "86400").sendFile(cacheFile.toString())
             return;
         }
@@ -196,7 +202,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         }
 
         launch(Dispatchers.IO) {
-            webClient.getAbs(coverUrl).timeout(3000).send {
+            webClient.getAbs(coverUrl).timeout(3000).send().onComplete {
                 var bodyBytes = it.result()?.bodyAsBuffer()?.getBytes()
                 if (bodyBytes != null) {
                     var res = context.response().putHeader("Cache-Control", "86400")
@@ -221,7 +227,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var fileList = arrayListOf<Map<String, Any>>()
         context.fileUploads().forEach {
             var file = File(it.uploadedFileName())
-            logger.info("uploadFile: {} {} {}", it.uploadedFileName(), it.fileName(), file)
+            logger.info { "uploadFile: ${it.uploadedFileName()} ${it.fileName()} ${file}" }
             if (file.exists()) {
                 var fileName = it.fileName()
                 val ext = getFileExt(fileName)
@@ -250,7 +256,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
                 if (newFile.exists()) {
                     newFile.delete()
                 }
-                logger.info("moveTo: {}", newFile)
+                logger.info { "moveTo: ${newFile}" }
                 if (file.copyRecursively(newFile)) {
                     val book = Book.initLocalBook(localFileUrl, localFilePath, getWorkDir())
                     book.setUserNameSpace(userNameSpace)
@@ -280,7 +286,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         if (!checkAuth(context)) {
             return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
         }
-        var book = context.bodyAsJson.mapTo(Book::class.java)
+        var book = context.body().asJsonObject().mapTo(Book::class.java)
         if (book.origin.isNullOrEmpty()) {
             return returnData.setErrorMsg("未找到书源信息")
         }
@@ -301,7 +307,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var bookUrl: String
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            bookUrl = context.bodyAsJson.getString("bookUrl")
+            bookUrl = context.body().asJsonObject().getString("bookUrl")
         } else {
             // get 请求
             bookUrl = context.queryParam("bookUrl").firstOrNull() ?: ""
@@ -319,7 +325,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
 
         editShelfBook(bookInfo, userNameSpace) { existBook ->
             existBook.coverUrl = bookInfo.coverUrl
-            logger.info("refreshLocalBook: {}", existBook)
+            logger.info { "refreshLocalBook: ${existBook}" }
             existBook
         }
 
@@ -335,13 +341,17 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var refresh: Int = 0
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            bookUrl = context.bodyAsJson.getString("url") ?: context.bodyAsJson.getJsonObject("book").getString("bookUrl") ?: ""
-            refresh = context.bodyAsJson.getInteger("refresh", 0)
+            bookUrl = context.body().asJsonObject().getString("url") ?: context.body().asJsonObject().getJsonObject("book").getString("bookUrl") ?: ""
+            refresh = context.body().asJsonObject().getInteger("refresh", 0)
         } else {
             // get 请求
             bookUrl = context.queryParam("url").firstOrNull() ?: ""
             refresh = context.queryParam("refresh").firstOrNull()?.toInt() ?: 0
         }
+        val fromBookInfo = if (context.request().method() == HttpMethod.POST) {
+            context.body().asJsonObject().getValue("fromBookInfo")?.toString()
+        } else context.queryParam("fromBookInfo").firstOrNull()
+        val isFromBookInfo = fromBookInfo == "1" || fromBookInfo?.toBooleanStrictOrNull() == true
         if (bookUrl.isNullOrEmpty()) {
             return returnData.setErrorMsg("请输入书籍链接")
         }
@@ -362,7 +372,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             if (bookSource.isNullOrEmpty()) {
                 return returnData.setErrorMsg("未配置书源")
             }
-            bookInfo = mergeBookCacheInfo(WebBook(bookSource, appConfig.debugLog).getBookInfo(bookUrl))
+            bookInfo = mergeBookCacheInfo(WebBook(bookSource, appConfig.debugLog, userNameSpace = getUserNameSpace(context)).getBookInfo(bookUrl))
             // 缓存书籍信息
             saveBookInfoCache(arrayListOf<Book>(bookInfo))
         } else {
@@ -376,15 +386,19 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         if (bookInfo.isLocalBook()) {
             val localFile = bookInfo.getLocalFile()
             if (!localFile.exists()) {
-                logger.info("localFile: {} not exists", localFile)
+                logger.info { "localFile: ${localFile} not exists" }
                 return returnData.setErrorMsg("本地书籍源文件不存在")
             }
         }
         // 缓存章节列表
-        logger.info("bookInfo: {}", bookInfo)
-        var chapterList = getLocalChapterList(bookInfo, bookSource ?: "", refresh > 0, getUserNameSpace(context))
+        logger.info { "bookInfo: ${bookInfo}" }
+        var chapterList = getLocalChapterList(bookInfo, bookSource ?: "", refresh > 0, getUserNameSpace(context),
+            isFromBookInfo = isFromBookInfo)
 
-        return returnData.setData(chapterList)
+        val editDirectory = getChapterCacheDir(bookInfo, getUserNameSpace(context))
+        return returnData.setData(chapterList.map { chapter ->
+            com.htmake.reader.api.service.ChapterEdits.read(editDirectory, chapter)?.let { chapter.copy(title = it.getString("title")) } ?: chapter
+        })
     }
 
     suspend fun saveBookProgress(context: RoutingContext): ReturnData {
@@ -396,8 +410,8 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var chapterIndex: Int
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            bookUrl = context.bodyAsJson.getString("url") ?: context.bodyAsJson.getJsonObject("searchBook").getString("bookUrl") ?: ""
-            chapterIndex = context.bodyAsJson.getInteger("index", -1)
+            bookUrl = context.body().asJsonObject().getString("url") ?: context.body().asJsonObject().getJsonObject("searchBook").getString("bookUrl") ?: ""
+            chapterIndex = context.body().asJsonObject().getInteger("index", -1)
         } else {
             // get 请求
             bookUrl = context.queryParam("url").firstOrNull() ?: ""
@@ -418,18 +432,22 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             return returnData.setErrorMsg("未配置书源")
         }
         var chapterList = getLocalChapterList(bookInfo, bookSource ?: "", false, userNameSpace)
-        if (chapterIndex >= chapterList.size) {
+        if (chapterIndex !in chapterList.indices) {
             return returnData.setErrorMsg("章节不存在")
         }
         var chapterInfo = chapterList.get(chapterIndex)
+        val body = if (context.request().method() == HttpMethod.POST) context.body().asJsonObject() else JsonObject()
+        val chapterPos = body.getInteger("chapterPos") ?: if (chapterIndex == bookInfo.durChapterIndex) bookInfo.durChapterPos else 0
+        if (chapterPos < 0) return returnData.setErrorMsg("章节位置不合法")
+        val savedAt = body.getLong("time", System.currentTimeMillis()).coerceAtMost(System.currentTimeMillis() + 300_000)
         // 书架书籍保存阅读进度
-        saveShelfBookProgress(bookInfo, chapterInfo, userNameSpace)
+        saveShelfBookProgress(bookInfo, chapterInfo, userNameSpace, chapterPos, savedAt)
         // 保存到 webdav
         saveBookProgressToWebdav(bookInfo, chapterInfo, userNameSpace)
-        return returnData.setData("")
+        return returnData.setData(getShelfBookByURL(bookUrl, userNameSpace) ?: bookInfo)
     }
 
-    suspend fun getBookContent(context: RoutingContext): ReturnData {
+    suspend fun getBookContent(context: RoutingContext, details: Boolean = false): ReturnData {
         val returnData = ReturnData()
         if (!checkAuth(context)) {
             return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
@@ -441,11 +459,11 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var refresh: Int
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            chapterUrl = context.bodyAsJson.getString("chapterUrl") ?: context.bodyAsJson.getJsonObject("bookChapter")?.getString("url") ?: ""
-            bookUrl = context.bodyAsJson.getString("url") ?: context.bodyAsJson.getJsonObject("searchBook")?.getString("bookUrl") ?: ""
-            chapterIndex = context.bodyAsJson.getInteger("index", -1)
-            cache = context.bodyAsJson.getInteger("cache", 0)
-            refresh = context.bodyAsJson.getInteger("refresh", 0)
+            chapterUrl = context.body().asJsonObject().getString("chapterUrl") ?: context.body().asJsonObject().getJsonObject("bookChapter")?.getString("url") ?: ""
+            bookUrl = context.body().asJsonObject().getString("url") ?: context.body().asJsonObject().getJsonObject("searchBook")?.getString("bookUrl") ?: ""
+            chapterIndex = context.body().asJsonObject().getInteger("index", -1)
+            cache = context.body().asJsonObject().getInteger("cache", 0)
+            refresh = context.body().asJsonObject().getInteger("refresh", 0)
         } else {
             // get 请求
             chapterUrl = context.queryParam("chapterUrl").firstOrNull() ?: ""
@@ -472,7 +490,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             }
             // 看看有没有缓存数据
             var cacheInfo: Book? = bookInfoCache.getAsString(bookUrl)?.toMap()?.toDataClass()
-            if (cacheInfo != null) {
+            if (bookInfo == null && cacheInfo != null) {
                 // 使用缓存的书籍信息包含的书源
                 bookSource = getBookSourceString(context, cacheInfo.origin)
             }
@@ -484,16 +502,12 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
                 if (bookInfo != null && !bookInfo.isLocalBook() && bookSource.isNullOrEmpty()) {
                     return returnData.setErrorMsg("未配置书源")
                 }
-                bookInfo = bookInfo ?: mergeBookCacheInfo(WebBook(bookSource ?: "", appConfig.debugLog).getBookInfo(bookUrl))
+                bookInfo = bookInfo ?: mergeBookCacheInfo(WebBook(bookSource ?: "", appConfig.debugLog, userNameSpace = getUserNameSpace(context)).getBookInfo(bookUrl))
                 var chapterList = getLocalChapterList(bookInfo, bookSource ?: "", false, userNameSpace)
                 if (chapterIndex < chapterList.size) {
                     chapterInfo = chapterList.get(chapterIndex)
-                    // 书架书籍保存阅读进度
-                    if (isInBookShelf && cache != 1) {
-                        saveShelfBookProgress(bookInfo, chapterInfo, userNameSpace)
-                        // 保存到 webdav
-                        saveBookProgressToWebdav(bookInfo, chapterInfo, userNameSpace)
-                    }
+                    // Fetching content is read-only: prefetch, offline downloads and searches must not move progress.
+                    // Readers explicitly submit saveBookProgress, including their character position.
                     chapterUrl = chapterInfo.url
                     if (chapterIndex + 1 < chapterList.size) {
                         var nextChapterInfo = chapterList.get(chapterIndex + 1)
@@ -512,6 +526,26 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             return returnData.setErrorMsg("获取章节链接失败")
         }
 
+        val readingBook = bookInfo
+        val readingChapter = chapterInfo
+        if (!readingBook.isLocalBook()) {
+            val directory = getChapterCacheDir(readingBook, userNameSpace)
+            val edited = com.htmake.reader.api.service.ChapterEdits.read(directory, readingChapter)
+            if (edited != null) {
+                com.htmake.reader.api.service.ChapterEdits.apply(directory, readingChapter, edited)
+                return if (details) returnData.setData(mapOf("content" to edited.getString("content"),
+                    "chapter" to com.htmake.reader.api.service.ChapterMetadata.read(directory, readingChapter).map,
+                    "type" to readingBook.type, "edited" to true)) else returnData.setData(edited.getString("content"))
+            }
+        }
+        fun respond(value: String, cached: Boolean = false): ReturnData {
+            val directory = getChapterCacheDir(readingBook, userNameSpace)
+            if (!cached) com.htmake.reader.api.service.ChapterMetadata.save(directory, readingChapter)
+            if (!details) return returnData.setData(value)
+            val metadata = if (cached) com.htmake.reader.api.service.ChapterMetadata.read(directory, readingChapter)
+                else com.htmake.reader.api.service.ChapterMetadata.values(readingChapter)
+            return returnData.setData(mapOf("content" to value, "chapter" to metadata.map, "type" to readingBook.type))
+        }
         var content = ""
         bookInfo.setRootDir(getWorkDir())
         bookInfo.setUserNameSpace(userNameSpace)
@@ -538,8 +572,9 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
                 }
 
                 val epubRootDir = bookInfo.getEpubRootDir()
-                var chapterFilePath = getWorkDir(bookInfo.bookUrl, "index", epubRootDir, chapterInfo.url)
-                logger.info("chapterFilePath: {} {}", chapterFilePath, epubRootDir)
+                val chapterPath = chapterInfo.url.substringBefore('#')
+                val chapterFilePath = getWorkDir(bookInfo.bookUrl, "index", epubRootDir, chapterPath)
+                logger.info { "chapterFilePath: ${chapterFilePath} ${epubRootDir}" }
                 if (!File(chapterFilePath).exists()) {
                     return returnData.setErrorMsg("章节文件不存在")
                 }
@@ -547,30 +582,26 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
                 // BookConfig.injectJavascriptToEpubChapter(chapterFilePath);
 
                 // 直接返回 html访问地址
-                if (epubRootDir.isEmpty()) {
-                    content = bookInfo.bookUrl.replace("storage/data/", "/epub/") + "/index/" + chapterInfo.url
-                } else {
-                    content = bookInfo.bookUrl.replace("storage/data/", "/epub/") + "/index/" + epubRootDir + "/" + chapterInfo.url
-                }
-                return returnData.setData(content)
+                content = localArchiveResourceUrl(File(chapterFilePath), chapterInfo.url)
+                return respond(content)
             } else if (bookInfo.isCbz()) {
                 if (!extractCbz(bookInfo)) {
                     return returnData.setErrorMsg("CBZ书籍解压失败")
                 }
-                var chapterFilePath = getWorkDir(bookInfo.bookUrl, "index", chapterInfo.url)
-                logger.info("chapterFilePath: {}", chapterFilePath)
+                val chapterFilePath = getWorkDir(bookInfo.bookUrl, "index", chapterInfo.url.substringBefore('#'))
+                logger.info { "chapterFilePath: ${chapterFilePath}" }
                 val chapterFile = File(chapterFilePath)
                 if (!chapterFile.exists()) {
                     return returnData.setErrorMsg("章节文件不存在")
                 }
                 val ext = getFileExt(chapterFile.name).lowercase()
                 val imageExt = listOf("jpg", "jpeg", "gif", "png", "bmp", "webp", "svg")
-                val fileUrl = "__API_ROOT__" + bookInfo.bookUrl.replace("storage/data/", "/epub/") + "/index/" + chapterInfo.url
+                val fileUrl = "__API_ROOT__" + localArchiveResourceUrl(chapterFile, chapterInfo.url)
                 if (!imageExt.contains(ext)) {
-                    return returnData.setData(fileUrl)
+                    return respond(fileUrl)
                 }
                 content = "<img src='" + fileUrl + "' />"
-                return returnData.setData(content)
+                return respond(content)
             }
             var bookContent = LocalBook.getContent(bookInfo, chapterInfo)
             if (bookContent == null) {
@@ -579,20 +610,19 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             content = bookContent
         } else {
             // 查找章节缓存
-            var chapterCacheFile: File? = null
-            if (refresh <= 0 && appConfig.cacheChapterContent) {
-                val localCacheDir = getChapterCacheDir(bookInfo, userNameSpace)
-                chapterCacheFile = File(localCacheDir.absolutePath + File.separator + chapterIndex + ".txt")
-                if (chapterCacheFile.exists()) {
-                    content = chapterCacheFile.readText()
-                    logger.info("使用缓存的章节内容: {}", chapterCacheFile.toString())
-                    return returnData.setData(content)
+            val chapterCacheFile = if (appConfig.cacheChapterContent) File(getChapterCacheDir(bookInfo, userNameSpace), "${chapterInfo.index}.txt") else null
+            if (refresh <= 0 && chapterCacheFile != null) {
+                val cachedContent = com.htmake.reader.api.service.ChapterCache.read(chapterCacheFile.parentFile, chapterInfo.index, chapterInfo)
+                if (cachedContent != null) {
+                    content = cachedContent
+                    logger.info { "使用缓存的章节内容: ${chapterCacheFile.toString()}" }
+                    return respond(content, cached = true)
                 }
             }
             try {
-                content = WebBook(bookSource ?: "", appConfig.debugLog).getBookContent(bookInfo, chapterInfo, nextChapterUrl)
+                content = WebBook(bookSource ?: "", appConfig.debugLog, userNameSpace = getUserNameSpace(context)).getBookContent(bookInfo, chapterInfo, nextChapterUrl)
                 if (appConfig.cacheChapterContent && chapterCacheFile != null) {
-                    chapterCacheFile.writeText(content)
+                    com.htmake.reader.api.service.ChapterCache.save(chapterCacheFile.parentFile, chapterInfo, content)
                     // 保存图片
                     BookHelp.saveImages(
                         this,
@@ -615,7 +645,19 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             }
         }
 
-        return returnData.setData(content)
+        return respond(content)
+    }
+
+    private fun localArchiveResourceUrl(file: File, chapterUrl: String): String {
+        val root = File(getWorkDir("storage", "data")).canonicalFile.toPath()
+        val target = file.canonicalFile.toPath()
+        require(target.startsWith(root) && target != root) { "本地章节资源路径越界" }
+        fun encode(value: String) = URLEncoder.encode(value, "UTF-8").replace("+", "%20")
+        val path = "/epub/" + root.relativize(target).joinToString("/") { encode(it.toString()) }
+        if (!chapterUrl.contains('#')) return path
+        val rawFragment = chapterUrl.substringAfter('#')
+        val fragment = runCatching { URLDecoder.decode(rawFragment.replace("+", "%2B"), "UTF-8") }.getOrDefault(rawFragment)
+        return path + "#" + encode(fragment)
     }
 
     suspend fun exploreBook(context: RoutingContext): ReturnData {
@@ -630,15 +672,15 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var ruleFindUrl: String
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            ruleFindUrl = context.bodyAsJson.getString("ruleFindUrl")
-            page = context.bodyAsJson.getInteger("page", 1)
+            ruleFindUrl = context.body().asJsonObject().getString("ruleFindUrl")
+            page = context.body().asJsonObject().getInteger("page", 1)
         } else {
             // get 请求
             ruleFindUrl = context.queryParam("ruleFindUrl").firstOrNull() ?: ""
             page = context.queryParam("page").firstOrNull()?.toInt() ?: 1
         }
 
-        var result = WebBook(bookSource, false).exploreBook(ruleFindUrl, page)
+        var result = WebBook(bookSource, false, userNameSpace = getUserNameSpace(context)).exploreBook(ruleFindUrl, page)
         return returnData.setData(result)
     }
 
@@ -654,8 +696,8 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var page: Int
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            key = context.bodyAsJson.getString("key")
-            page = context.bodyAsJson.getInteger("page", 1)
+            key = context.body().asJsonObject().getString("key")
+            page = context.body().asJsonObject().getInteger("page", 1)
         } else {
             // get 请求
             key = context.queryParam("key").firstOrNull() ?: ""
@@ -665,7 +707,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             return returnData.setErrorMsg("请输入搜索关键字")
         }
         logger.info { "searchBook" }
-        var result = WebBook(bookSource, appConfig.debugLog).searchBook(key, page)
+        var result = WebBook(bookSource, appConfig.debugLog, userNameSpace = getUserNameSpace(context)).searchBook(key, page)
         return returnData.setData(result)
     }
 
@@ -681,11 +723,11 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var concurrentCount: Int
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            key = context.bodyAsJson.getString("key", "")
-            bookSourceGroup = context.bodyAsJson.getString("bookSourceGroup", "")
-            lastIndex = context.bodyAsJson.getInteger("lastIndex", -1)
-            searchSize = context.bodyAsJson.getInteger("searchSize", 20)
-            concurrentCount = context.bodyAsJson.getInteger("concurrentCount", 36)
+            key = context.body().asJsonObject().getString("key", "")
+            bookSourceGroup = context.body().asJsonObject().getString("bookSourceGroup", "")
+            lastIndex = context.body().asJsonObject().getInteger("lastIndex", -1)
+            searchSize = context.body().asJsonObject().getInteger("searchSize", 20)
+            concurrentCount = context.body().asJsonObject().getInteger("concurrentCount", 36)
         } else {
             // get 请求
             key = context.queryParam("key").firstOrNull() ?: ""
@@ -708,10 +750,10 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
 
         searchSize = if(searchSize > 0) searchSize else 20
         concurrentCount = if(concurrentCount > 0) concurrentCount else 36
-        logger.info("searchBookMulti from lastIndex: {} searchSize: {}", lastIndex, searchSize)
+        logger.info { "searchBookMulti from lastIndex: ${lastIndex} searchSize: ${searchSize}" }
         var isEnd = false
         context.request().connection().closeHandler{
-            logger.info("客户端已断开链接，停止 searchBookMulti")
+            logger.info { "客户端已断开链接，停止 searchBookMulti" }
             isEnd = true
         }
         var resultList = arrayListOf<SearchBook>()
@@ -735,7 +777,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
                     }
                 }
             }
-            logger.info("Loog: {} resultList.size: {}", loopCount, resultList.size)
+            logger.info { "Loog: ${loopCount} resultList.size: ${resultList.size}" }
             if (isEnd || loopCount >= concurrentLoopCount) {
                 // 超过最大轮次，终止执行
                 false
@@ -765,11 +807,11 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var concurrentCount: Int
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            key = context.bodyAsJson.getString("key", "")
-            bookSourceGroup = context.bodyAsJson.getString("bookSourceGroup", "")
-            lastIndex = context.bodyAsJson.getInteger("lastIndex", -1)
-            searchSize = context.bodyAsJson.getInteger("searchSize", 50)
-            concurrentCount = context.bodyAsJson.getInteger("concurrentCount", 24)
+            key = context.body().asJsonObject().getString("key", "")
+            bookSourceGroup = context.body().asJsonObject().getString("bookSourceGroup", "")
+            lastIndex = context.body().asJsonObject().getInteger("lastIndex", -1)
+            searchSize = context.body().asJsonObject().getInteger("searchSize", 50)
+            concurrentCount = context.body().asJsonObject().getInteger("concurrentCount", 4)
         } else {
             // get 请求
             key = context.queryParam("key").firstOrNull() ?: ""
@@ -798,11 +840,11 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
 
         searchSize = if(searchSize > 0) searchSize else 50
         concurrentCount = if(concurrentCount > 0) concurrentCount else 24
-        logger.info("searchBookMulti from lastIndex: {} concurrentCount: {} searchSize: {}", lastIndex, concurrentCount, searchSize)
+        logger.info { "searchBookMulti from lastIndex: ${lastIndex} concurrentCount: ${concurrentCount} searchSize: ${searchSize}" }
 
         var isEnd = false
         context.request().connection().closeHandler{
-            logger.info("客户端已断开链接，停止 searchBookMultiSSE")
+            logger.info { "客户端已断开链接，停止 searchBookMultiSSE" }
             isEnd = true
         }
         var resultList = arrayListOf<SearchBook>()
@@ -830,7 +872,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             }
             // 返回本轮数据
             response.write("data: " + jsonEncode(mapOf("lastIndex" to lastIndex, "data" to loopResult), false) + "\n\n")
-            logger.info("Loog: {} resultList.size: {}", loopCount, resultList.size)
+            logger.info { "Loog: ${loopCount} resultList.size: ${resultList.size}" }
 
             if (isEnd || loopCount >= concurrentLoopCount) {
                 // 超过最大轮次，终止执行
@@ -854,10 +896,10 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var bookSourceGroup: String
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            bookUrl = context.bodyAsJson.getString("url")
-            lastIndex = context.bodyAsJson.getInteger("lastIndex", -1)
-            searchSize = context.bodyAsJson.getInteger("searchSize", 5)
-            bookSourceGroup = context.bodyAsJson.getString("bookSourceGroup", "")
+            bookUrl = context.body().asJsonObject().getString("url")
+            lastIndex = context.body().asJsonObject().getInteger("lastIndex", -1)
+            searchSize = context.body().asJsonObject().getInteger("searchSize", 5)
+            bookSourceGroup = context.body().asJsonObject().getString("bookSourceGroup", "")
         } else {
             // get 请求
             bookUrl = context.queryParam("url").firstOrNull() ?: ""
@@ -894,10 +936,10 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             }
         }
 
-        logger.info("searchBookSource from lastIndex: {}", lastIndex)
+        logger.info { "searchBookSource from lastIndex: ${lastIndex}" }
         var isEnd = false
         context.request().connection().closeHandler{
-            logger.info("客户端已断开链接，停止 searchBookSource")
+            logger.info { "客户端已断开链接，停止 searchBookSource" }
             isEnd = true
         }
         searchSize = if(searchSize > 0) searchSize else 5
@@ -946,11 +988,11 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
 
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            bookUrl = context.bodyAsJson.getString("url")
-            lastIndex = context.bodyAsJson.getInteger("lastIndex", -1)
-            searchSize = context.bodyAsJson.getInteger("searchSize", 30)
-            bookSourceGroup = context.bodyAsJson.getString("bookSourceGroup", "")
-            refresh = context.bodyAsJson.getInteger("refresh", 0)
+            bookUrl = context.body().asJsonObject().getString("url")
+            lastIndex = context.body().asJsonObject().getInteger("lastIndex", -1)
+            searchSize = context.body().asJsonObject().getInteger("searchSize", 30)
+            bookSourceGroup = context.body().asJsonObject().getString("bookSourceGroup", "")
+            refresh = context.body().asJsonObject().getInteger("refresh", 0)
         } else {
             // get 请求
             bookUrl = context.queryParam("url").firstOrNull() ?: ""
@@ -1002,10 +1044,10 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         searchSize = if(searchSize > 0) searchSize else 30
         var resultList = arrayListOf<SearchBook>()
         var concurrentCount = Math.max(searchSize * 2, 24)
-        logger.info("searchBookMulti from lastIndex: {} concurrentCount: {} searchSize: {}", lastIndex, concurrentCount, searchSize)
+        logger.info { "searchBookMulti from lastIndex: ${lastIndex} concurrentCount: ${concurrentCount} searchSize: ${searchSize}" }
         var isEnd = false
         context.request().connection().closeHandler{
-            logger.info("客户端已断开链接，停止 searchBookSourceSSE")
+            logger.info { "客户端已断开链接，停止 searchBookSourceSSE" }
             isEnd = true
         }
 
@@ -1025,7 +1067,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             }
             // 返回本轮数据
             response.write("data: " + jsonEncode(mapOf("lastIndex" to lastIndex, "data" to loopResult), false) + "\n\n")
-            logger.info("Loog: {} resultList.size: {}", loopCount, resultList.size)
+            logger.info { "Loog: ${loopCount} resultList.size: ${resultList.size}" }
 
             if (isEnd || loopCount >= concurrentLoopCount) {
                 // 超过最大轮次，终止执行
@@ -1052,7 +1094,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             // val costTime = measureTimeMillis {
             try {
                 val start = System.currentTimeMillis()
-                var result = WebBook(bookSourceString, false).searchBook(book.name, 1)
+                var result = WebBook(bookSourceString, false, userNameSpace = userNameSpace).searchBook(book.name, 1)
                 val end = System.currentTimeMillis()
                 if (result.size > 0) {
                     for (j in 0 until result.size) {
@@ -1088,8 +1130,8 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var refresh: Int = 0
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            bookUrl = context.bodyAsJson.getString("url")
-            refresh = context.bodyAsJson.getInteger("refresh", 0)
+            bookUrl = context.body().asJsonObject().getString("url")
+            refresh = context.body().asJsonObject().getInteger("refresh", 0)
         } else {
             // get 请求
             bookUrl = context.queryParam("url").firstOrNull() ?: ""
@@ -1153,7 +1195,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var refresh: Int = 0
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            refresh = context.bodyAsJson.getInteger("refresh", 0)
+            refresh = context.body().asJsonObject().getInteger("refresh", 0)
         } else {
             // get 请求
             refresh = context.queryParam("refresh").firstOrNull()?.toInt() ?: 0
@@ -1170,7 +1212,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var url: String
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            url = context.bodyAsJson.getString("url")
+            url = context.body().asJsonObject().getString("url")
         } else {
             // get 请求
             url = context.queryParam("url").firstOrNull() ?: ""
@@ -1191,7 +1233,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         if (!checkAuth(context)) {
             return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
         }
-        var book = context.bodyAsJson.mapTo(Book::class.java)
+        var book = context.body().asJsonObject().mapTo(Book::class.java)
         if (book.origin.isNullOrEmpty()) {
             return returnData.setErrorMsg("未找到书源信息")
         }
@@ -1230,7 +1272,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
                 }
                 val relativeLocalFilePath = Paths.get("storage", "data", userNameSpace, book.name + "_" + book.author, tempFile.name).toString()
                 val localFilePath = getWorkDir(relativeLocalFilePath)
-                logger.info("localFilePath: {}", localFilePath)
+                logger.info { "localFilePath: ${localFilePath}" }
                 var localFile = File(localFilePath)
                 localFile.deleteRecursively()
                 if (!localFile.parentFile.exists()) {
@@ -1302,29 +1344,31 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             if (bookSource == null) {
                 return returnData.setErrorMsg("书源信息错误")
             }
-            var newBook = WebBook(bookSource, appConfig.debugLog).getBookInfo(book.bookUrl)
+            var newBook = WebBook(bookSource, appConfig.debugLog, userNameSpace = getUserNameSpace(context)).getBookInfo(book.bookUrl)
             book.fillData(newBook, listOf("name", "author", "coverUrl", "tocUrl", "intro", "latestChapterTitle", "wordCount"))
         }
         book = mergeBookCacheInfo(book)
 
-        if (existIndex >= 0) {
-            var bookList = bookshelf.getList()
-            var existBook = bookshelf.getJsonObject(existIndex).mapTo(Book::class.java)
-            book.durChapterIndex = existBook.durChapterIndex
-            book.durChapterTitle = existBook.durChapterTitle
-            book.durChapterTime = existBook.durChapterTime
-
-            bookList.set(existIndex, JsonObject.mapFrom(book))
-            bookshelf = JsonArray(bookList)
-        } else {
-            bookshelf.add(JsonObject.mapFrom(book))
+        val saved = userStorageTransaction(userNameSpace, "bookshelf") {
+            val latest = asJsonArray(getUserStorage(userNameSpace, "bookshelf")) ?: JsonArray()
+            val index = (0 until latest.size()).firstOrNull {
+                val existing = latest.getJsonObject(it).mapTo(Book::class.java)
+                existing.bookUrl == book.bookUrl || existing.name == book.name && existing.author == book.author
+            }
+            if (index == null && latest.size() >= appConfig.userBookLimit) return@userStorageTransaction false
+            if (index != null) {
+                val existing = latest.getJsonObject(index).mapTo(Book::class.java)
+                book.durChapterIndex = existing.durChapterIndex
+                book.durChapterPos = existing.durChapterPos
+                book.durChapterTitle = existing.durChapterTitle
+                book.durChapterTime = existing.durChapterTime
+                latest.list[index] = JsonObject.mapFrom(book)
+            } else latest.add(JsonObject.mapFrom(book))
+            saveUserStorage(userNameSpace, "bookshelf", latest)
+            true
         }
-        // 保存书源信息
-        val sourceList = listOf(book.toSearchBook())
-        saveBookSources(book, sourceList, userNameSpace)
-
-        // logger.info("bookshelf: {}", bookshelf)
-        saveUserStorage(userNameSpace, "bookshelf", bookshelf)
+        if (!saved) return returnData.setErrorMsg("超过用户书籍数上限")
+        saveBookSources(book, listOf(book.toSearchBook()), userNameSpace)
         return returnData.setData(book)
     }
 
@@ -1338,9 +1382,9 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var bookSourceUrl: String
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            bookUrl = context.bodyAsJson.getString("bookUrl")
-            newBookUrl = context.bodyAsJson.getString("newUrl")
-            bookSourceUrl = context.bodyAsJson.getString("bookSourceUrl")
+            bookUrl = context.body().asJsonObject().getString("bookUrl")
+            newBookUrl = context.body().asJsonObject().getString("newUrl")
+            bookSourceUrl = context.body().asJsonObject().getString("bookSourceUrl")
         } else {
             // get 请求
             bookUrl = context.queryParam("bookUrl").firstOrNull() ?: ""
@@ -1390,27 +1434,33 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             if (bookSourceString.isNullOrEmpty()) {
                 return returnData.setErrorMsg("书源信息错误")
             }
-            WebBook(bookSourceString, appConfig.debugLog).getBookInfo(newBookUrl)
+            WebBook(bookSourceString, appConfig.debugLog, userNameSpace = getUserNameSpace(context)).getBookInfo(newBookUrl)
         }
 
+        val newChapters = getLocalChapterList(newBookInfo, bookSourceString ?: "", true, userNameSpace)
+        require(newChapters.isNotEmpty()) { "新书源目录为空" }
+        val matchedIndex = com.htmake.reader.api.service.ReadingPosition.matchChapter(book.durChapterIndex, book.durChapterTitle, newChapters)
         editShelfBook(book, userNameSpace) { existBook ->
             existBook.origin = newBookInfo.origin
             existBook.originName = newBookInfo.originName
             existBook.bookUrl = newBookInfo.bookUrl
             existBook.tocUrl = newBookInfo.tocUrl
+            existBook.durChapterIndex = matchedIndex
+            existBook.durChapterTitle = newChapters[matchedIndex].title
+            existBook.durChapterPos = 0
+            existBook.totalChapterNum = newChapters.size
+            existBook.durChapterTime = System.currentTimeMillis()
             if (existBook.coverUrl.isNullOrEmpty() && !newBookInfo.coverUrl.isNullOrEmpty()) {
                 existBook.coverUrl = newBookInfo.coverUrl
             }
 
-            logger.info("setBookSource: {}", existBook)
+            logger.info { "setBookSource: ${existBook}" }
 
             newBookInfo = existBook
 
             existBook
         }
 
-        // 更新目录
-        getLocalChapterList(newBookInfo, bookSourceString ?: "", true, userNameSpace)
         return returnData.setData(newBookInfo)
     }
 
@@ -1423,8 +1473,8 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var groupId: Int
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            bookUrl = context.bodyAsJson.getString("bookUrl")
-            groupId = context.bodyAsJson.getInteger("groupId", 0)
+            bookUrl = context.body().asJsonObject().getString("bookUrl")
+            groupId = context.body().asJsonObject().getInteger("groupId", 0)
         } else {
             // get 请求
             bookUrl = context.queryParam("bookUrl").firstOrNull() ?: ""
@@ -1445,7 +1495,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
 
         editShelfBook(book, userNameSpace) { existBook ->
             existBook.group = groupId
-            logger.info("saveBookGroupId: {}", existBook)
+            logger.info { "saveBookGroupId: ${existBook}" }
             existBook
         }
 
@@ -1458,17 +1508,17 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         if (!checkAuth(context)) {
             return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
         }
-        val groupId: Int = context.bodyAsJson.getInteger("groupId", 0)
+        val groupId: Int = context.body().asJsonObject().getInteger("groupId", 0)
         if (groupId <= 0) {
             return returnData.setErrorMsg("分组信息错误")
         }
         var userNameSpace = getUserNameSpace(context)
-        val bookJsonArray = context.bodyAsJson.getJsonArray("bookList", JsonArray())
+        val bookJsonArray = context.body().asJsonObject().getJsonArray("bookList", JsonArray())
         for (k in 0 until bookJsonArray.size()) {
             var book = bookJsonArray.getJsonObject(k).mapTo(Book::class.java)
             editShelfBook(book, userNameSpace) { existBook ->
                 existBook.group = existBook.group or groupId
-                logger.info("saveBookGroupId: {}", existBook)
+                logger.info { "saveBookGroupId: ${existBook}" }
                 existBook
             }
         }
@@ -1481,17 +1531,17 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         if (!checkAuth(context)) {
             return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
         }
-        val groupId: Int = context.bodyAsJson.getInteger("groupId", 0)
+        val groupId: Int = context.body().asJsonObject().getInteger("groupId", 0)
         if (groupId <= 0) {
             return returnData.setErrorMsg("分组信息错误")
         }
         var userNameSpace = getUserNameSpace(context)
-        val bookJsonArray = context.bodyAsJson.getJsonArray("bookList", JsonArray())
+        val bookJsonArray = context.body().asJsonObject().getJsonArray("bookList", JsonArray())
         for (k in 0 until bookJsonArray.size()) {
             var book = bookJsonArray.getJsonObject(k).mapTo(Book::class.java)
             editShelfBook(book, userNameSpace) { existBook ->
-                existBook.group = existBook.group xor groupId
-                logger.info("saveBookGroupId: {}", existBook)
+                existBook.group = existBook.group and groupId.inv()
+                logger.info { "saveBookGroupId: ${existBook}" }
                 existBook
             }
         }
@@ -1504,55 +1554,13 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         if (!checkAuth(context)) {
             return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
         }
-        var book = context.bodyAsJson.mapTo(Book::class.java)
+        var book = context.body().asJsonObject().mapTo(Book::class.java)
         var userNameSpace = getUserNameSpace(context)
-        var bookshelf: JsonArray? = asJsonArray(getUserStorage(userNameSpace, "bookshelf"))
-        if (bookshelf == null) {
-            bookshelf = JsonArray()
-        }
-        // 遍历判断书本是否存在
-        var existIndex: Int = -1
-        for (i in 0 until bookshelf.size()) {
-            var _book = bookshelf.getJsonObject(i).mapTo(Book::class.java)
-            if (_book.bookUrl.equals(book.bookUrl)) {
-                existIndex = i
-                book = _book
-                break;
+        return userStorageTransaction(userNameSpace, "bookshelf") {
+            var bookshelf: JsonArray? = asJsonArray(getUserStorage(userNameSpace, "bookshelf"))
+            if (bookshelf == null) {
+                bookshelf = JsonArray()
             }
-            if (_book.name.equals(book.name) && _book.author.equals(book.author)) {
-                existIndex = i
-                book = _book
-                break;
-            }
-        }
-        if (existIndex < 0) {
-            return returnData.setErrorMsg("书架书籍不存在")
-        }
-        bookshelf.remove(existIndex)
-        // logger.info("bookshelf: {}", bookshelf)
-        saveUserStorage(userNameSpace, "bookshelf", bookshelf)
-
-        // 删除书籍目录
-        val localBookPath = File(getWorkDir("storage", "data", userNameSpace, book.name + "_" + book.author))
-        localBookPath.deleteRecursively()
-
-        return returnData.setData("删除书籍成功")
-    }
-
-    suspend fun deleteBooks(context: RoutingContext): ReturnData {
-        val returnData = ReturnData()
-        if (!checkAuth(context)) {
-            return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
-        }
-        val bookJsonArray = context.bodyAsJsonArray
-
-        var userNameSpace = getUserNameSpace(context)
-        var bookshelf: JsonArray? = asJsonArray(getUserStorage(userNameSpace, "bookshelf"))
-        if (bookshelf == null) {
-            bookshelf = JsonArray()
-        }
-        for (k in 0 until bookJsonArray.size()) {
-            var book = bookJsonArray.getJsonObject(k).mapTo(Book::class.java)
             // 遍历判断书本是否存在
             var existIndex: Int = -1
             for (i in 0 until bookshelf.size()) {
@@ -1568,16 +1576,66 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
                     break;
                 }
             }
-            if (existIndex >= 0) {
-                bookshelf.remove(existIndex)
+            if (existIndex < 0) {
+                return@userStorageTransaction returnData.setErrorMsg("书架书籍不存在")
             }
-            // 删除书籍目录
-            val localBookPath = File(getWorkDir("storage", "data", userNameSpace, book.name + "_" + book.author))
-            localBookPath.deleteRecursively()
-        }
+            bookshelf.remove(existIndex)
+            // logger.info("bookshelf: {}", bookshelf)
+            saveUserStorage(userNameSpace, "bookshelf", bookshelf)
 
-        saveUserStorage(userNameSpace, "bookshelf", bookshelf)
-        return returnData.setData("")
+            // 删除书籍目录
+            deleteBookDirectory(book, userNameSpace)
+
+            return@userStorageTransaction returnData.setData("删除书籍成功")
+        }
+    }
+
+    suspend fun deleteBooks(context: RoutingContext): ReturnData {
+        val returnData = ReturnData()
+        if (!checkAuth(context)) {
+            return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
+        }
+        val bookJsonArray = context.body().asJsonArray()
+
+        var userNameSpace = getUserNameSpace(context)
+        return userStorageTransaction(userNameSpace, "bookshelf") {
+            var bookshelf: JsonArray? = asJsonArray(getUserStorage(userNameSpace, "bookshelf"))
+            if (bookshelf == null) {
+                bookshelf = JsonArray()
+            }
+            for (k in 0 until bookJsonArray.size()) {
+                var book = bookJsonArray.getJsonObject(k).mapTo(Book::class.java)
+                // 遍历判断书本是否存在
+                var existIndex: Int = -1
+                for (i in 0 until bookshelf.size()) {
+                    var _book = bookshelf.getJsonObject(i).mapTo(Book::class.java)
+                    if (_book.bookUrl.equals(book.bookUrl)) {
+                        existIndex = i
+                        book = _book
+                        break;
+                    }
+                    if (_book.name.equals(book.name) && _book.author.equals(book.author)) {
+                        existIndex = i
+                        book = _book
+                        break;
+                    }
+                }
+                if (existIndex >= 0) {
+                    bookshelf.remove(existIndex)
+                    deleteBookDirectory(book, userNameSpace)
+                }
+            }
+
+            saveUserStorage(userNameSpace, "bookshelf", bookshelf)
+            return@userStorageTransaction returnData.setData("")
+        }
+    }
+
+    private fun deleteBookDirectory(book: Book, userNameSpace: String) {
+        val configured = storageDirectory("data", userNameSpace, book.name + "_" + book.author)
+        val legacy = File(getWorkDir("storage"), "data/$userNameSpace/${book.name}_${book.author}")
+        configured.deleteRecursively()
+        if (legacy.canonicalFile != configured.canonicalFile) legacy.deleteRecursively()
     }
 
     suspend fun getBookGroups(context: RoutingContext): ReturnData {
@@ -1587,17 +1645,19 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
         }
         var userNameSpace = getUserNameSpace(context)
-        var bookGroupList: JsonArray? = asJsonArray(getUserStorage(userNameSpace, "bookGroup"))
-        if (bookGroupList == null) {
-            bookGroupList = asJsonArray("""
-            [{"groupId":-1,"groupName":"全部","order":-10,"show":true},{"groupId":-2,"groupName":"本地","order":-9,"show":true},{"groupId":-3,"groupName":"音频","order":-8,"show":true},{"groupId":-4,"groupName":"未分组","order":-7,"show":true}]
-            """)
+        return userStorageTransaction(userNameSpace, "bookGroup") {
+            var bookGroupList: JsonArray? = asJsonArray(getUserStorage(userNameSpace, "bookGroup"))
             if (bookGroupList == null) {
-                return returnData.setData(arrayListOf<Int>())
+                bookGroupList = asJsonArray("""
+                [{"groupId":-1,"groupName":"全部","order":-10,"show":true},{"groupId":-2,"groupName":"本地","order":-9,"show":true},{"groupId":-3,"groupName":"音频","order":-8,"show":true},{"groupId":-4,"groupName":"未分组","order":-7,"show":true}]
+                """)
+                if (bookGroupList == null) {
+                    return@userStorageTransaction returnData.setData(arrayListOf<Int>())
+                }
+                saveUserStorage(userNameSpace, "bookGroup", bookGroupList)
             }
-            saveUserStorage(userNameSpace, "bookGroup", bookGroupList)
+            return@userStorageTransaction returnData.setData(bookGroupList.getList())
         }
-        return returnData.setData(bookGroupList.getList())
     }
 
     suspend fun saveBookGroup(context: RoutingContext): ReturnData {
@@ -1605,52 +1665,54 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         if (!checkAuth(context)) {
             return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
         }
-        val bookGroup = context.bodyAsJson.mapTo(BookGroup::class.java)
+        val bookGroup = context.body().asJsonObject().mapTo(BookGroup::class.java)
         if (bookGroup.groupName.isEmpty()) {
             return returnData.setErrorMsg("分组名称不能为空")
         }
 
         var userNameSpace = getUserNameSpace(context)
-        var bookGroupList: JsonArray? = asJsonArray(getUserStorage(userNameSpace, "bookGroup"))
-        if (bookGroupList == null) {
-            bookGroupList = JsonArray()
-        }
-        // 遍历判断书本是否存在
-        var existIndex: Int = -1
-        for (i in 0 until bookGroupList.size()) {
-            var _bookGroup = bookGroupList.getJsonObject(i).mapTo(BookGroup::class.java)
-            if (_bookGroup.groupId.equals(bookGroup.groupId)) {
-                existIndex = i
-                break;
+        return userStorageTransaction(userNameSpace, "bookGroup") {
+            var bookGroupList: JsonArray? = asJsonArray(getUserStorage(userNameSpace, "bookGroup"))
+            if (bookGroupList == null) {
+                bookGroupList = JsonArray()
             }
-        }
-        if (existIndex >= 0) {
-            var groupList = bookGroupList.getList()
-            groupList.set(existIndex, JsonObject.mapFrom(bookGroup))
-            bookGroupList = JsonArray(groupList)
-        } else {
-            // 新增分组
-            if (bookGroup.groupId >= 0) {
-                var maxOrder = 0;
-                val idsSum = bookGroupList.sumBy{
-                    val id = asJsonObject(it)?.getInteger("groupId", 0) ?: 0
-                    val order = asJsonObject(it)?.getInteger("order", 0) ?: 0
-                    maxOrder = if (order > maxOrder) order else maxOrder
-                    if (id > 0) id else 0
+            // 遍历判断书本是否存在
+            var existIndex: Int = -1
+            for (i in 0 until bookGroupList.size()) {
+                var _bookGroup = bookGroupList.getJsonObject(i).mapTo(BookGroup::class.java)
+                if (_bookGroup.groupId.equals(bookGroup.groupId)) {
+                    existIndex = i
+                    break;
                 }
-                var id = 1
-                while (id and idsSum != 0) {
-                    id = id.shl(1)
-                }
-                bookGroup.groupId = id
-                bookGroup.order = maxOrder + 1
             }
-            bookGroupList.add(JsonObject.mapFrom(bookGroup))
-        }
+            if (existIndex >= 0) {
+                var groupList = bookGroupList.getList()
+                groupList.set(existIndex, JsonObject.mapFrom(bookGroup))
+                bookGroupList = JsonArray(groupList)
+            } else {
+                // 新增分组
+                if (bookGroup.groupId >= 0) {
+                    var maxOrder = 0;
+                    val idsSum = bookGroupList.sumBy{
+                        val id = asJsonObject(it)?.getInteger("groupId", 0) ?: 0
+                        val order = asJsonObject(it)?.getInteger("order", 0) ?: 0
+                        maxOrder = if (order > maxOrder) order else maxOrder
+                        if (id > 0) id else 0
+                    }
+                    var id = 1
+                    while (id and idsSum != 0) {
+                        id = id.shl(1)
+                    }
+                    bookGroup.groupId = id
+                    bookGroup.order = maxOrder + 1
+                }
+                bookGroupList.add(JsonObject.mapFrom(bookGroup))
+            }
 
-        // logger.info("bookGroupList: {}", bookGroupList)
-        saveUserStorage(userNameSpace, "bookGroup", bookGroupList)
-        return returnData.setData("")
+            // logger.info("bookGroupList: {}", bookGroupList)
+            saveUserStorage(userNameSpace, "bookGroup", bookGroupList)
+            return@userStorageTransaction returnData.setData("")
+        }
     }
 
     suspend fun saveBookGroupOrder(context: RoutingContext): ReturnData {
@@ -1658,34 +1720,36 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         if (!checkAuth(context)) {
             return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
         }
-        val bookGroupOrder = context.bodyAsJson.getJsonArray("order", null)
+        val bookGroupOrder = context.body().asJsonObject().getJsonArray("order", null)
         if (bookGroupOrder == null) {
             return returnData.setErrorMsg("参数错误")
         }
 
         var userNameSpace = getUserNameSpace(context)
-        var bookGroupList: JsonArray? = asJsonArray(getUserStorage(userNameSpace, "bookGroup"))
-        if (bookGroupList == null) {
-            bookGroupList = JsonArray()
-        }
-        var orderMap: MutableMap<Int, Int> = mutableMapOf()
-        for (i in 0 until bookGroupOrder.size()) {
-            orderMap.put(bookGroupOrder.getJsonObject(i).getInteger("groupId"), bookGroupOrder.getJsonObject(i).getInteger("order"))
-        }
-        // 遍历判断书本是否存在
-        var groupList = bookGroupList.getList()
-        for (i in 0 until bookGroupList.size()) {
-            var bookGroup = bookGroupList.getJsonObject(i).mapTo(BookGroup::class.java)
-            if (orderMap.containsKey(bookGroup.groupId)) {
-                bookGroup.order = orderMap.get(bookGroup.groupId) as? Int ?: bookGroup.order
-                groupList.set(i, JsonObject.mapFrom(bookGroup))
+        return userStorageTransaction(userNameSpace, "bookGroup") {
+            var bookGroupList: JsonArray? = asJsonArray(getUserStorage(userNameSpace, "bookGroup"))
+            if (bookGroupList == null) {
+                bookGroupList = JsonArray()
             }
-        }
-        bookGroupList = JsonArray(groupList)
+            var orderMap: MutableMap<Int, Int> = mutableMapOf()
+            for (i in 0 until bookGroupOrder.size()) {
+                orderMap.put(bookGroupOrder.getJsonObject(i).getInteger("groupId"), bookGroupOrder.getJsonObject(i).getInteger("order"))
+            }
+            // 遍历判断书本是否存在
+            var groupList = bookGroupList.getList()
+            for (i in 0 until bookGroupList.size()) {
+                var bookGroup = bookGroupList.getJsonObject(i).mapTo(BookGroup::class.java)
+                if (orderMap.containsKey(bookGroup.groupId)) {
+                    bookGroup.order = orderMap.get(bookGroup.groupId) as? Int ?: bookGroup.order
+                    groupList.set(i, JsonObject.mapFrom(bookGroup))
+                }
+            }
+            bookGroupList = JsonArray(groupList)
 
-        // logger.info("bookGroupList: {}", bookGroupList)
-        saveUserStorage(userNameSpace, "bookGroup", bookGroupList)
-        return returnData.setData("")
+            // logger.info("bookGroupList: {}", bookGroupList)
+            saveUserStorage(userNameSpace, "bookGroup", bookGroupList)
+            return@userStorageTransaction returnData.setData("")
+        }
     }
 
     suspend fun deleteBookGroup(context: RoutingContext): ReturnData {
@@ -1693,27 +1757,29 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         if (!checkAuth(context)) {
             return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
         }
-        val bookgroup = context.bodyAsJson.mapTo(BookGroup::class.java)
+        val bookgroup = context.body().asJsonObject().mapTo(BookGroup::class.java)
         var userNameSpace = getUserNameSpace(context)
-        var bookGroupList: JsonArray? = asJsonArray(getUserStorage(userNameSpace, "bookGroup"))
-        if (bookGroupList == null) {
-            bookGroupList = JsonArray()
-        }
-        // 遍历判断分组是否存在
-        var existIndex: Int = -1
-        for (i in 0 until bookGroupList.size()) {
-            var _bookGroup = bookGroupList.getJsonObject(i).mapTo(BookGroup::class.java)
-            if (_bookGroup.groupId.equals(bookgroup.groupId)) {
-                existIndex = i
-                break;
+        return userStorageTransaction(userNameSpace, "bookGroup") {
+            var bookGroupList: JsonArray? = asJsonArray(getUserStorage(userNameSpace, "bookGroup"))
+            if (bookGroupList == null) {
+                bookGroupList = JsonArray()
             }
+            // 遍历判断分组是否存在
+            var existIndex: Int = -1
+            for (i in 0 until bookGroupList.size()) {
+                var _bookGroup = bookGroupList.getJsonObject(i).mapTo(BookGroup::class.java)
+                if (_bookGroup.groupId.equals(bookgroup.groupId)) {
+                    existIndex = i
+                    break;
+                }
+            }
+            if (existIndex >= 0) {
+                bookGroupList.remove(existIndex)
+            }
+            // logger.info("bookGroup: {}", bookGroup)
+            saveUserStorage(userNameSpace, "bookGroup", bookGroupList)
+            return@userStorageTransaction returnData.setData("")
         }
-        if (existIndex >= 0) {
-            bookGroupList.remove(existIndex)
-        }
-        // logger.info("bookGroup: {}", bookGroup)
-        saveUserStorage(userNameSpace, "bookGroup", bookGroupList)
-        return returnData.setData("")
     }
 
     suspend fun saveBookInfoCache(bookList: List<Book>): List<Book> {
@@ -1722,7 +1788,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
                 var book = bookList.get(i)
                 bookInfoCache.put(book.bookUrl, jsonEncode(JsonObject.mapFrom(book).map))
             }
-            saveStorage("cache", "bookInfoCache", value = bookInfoCache)
+            // ACache persists each entry itself; its internal File/manager state is not book JSON.
         }
         return bookList
     }
@@ -1777,8 +1843,9 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
     }
 
 
-    suspend fun getLocalChapterList(book: Book, bookSource: String, refresh: Boolean = false, userNameSpace: String, debugLog: Boolean = true, mutex: Mutex? = null): List<BookChapter> {
-        val md5Encode = MD5Utils.md5Encode(book.bookUrl).toString()
+    suspend fun getLocalChapterList(book: Book, bookSource: String, refresh: Boolean = false, userNameSpace: String, debugLog: Boolean = true, mutex: Mutex? = null, isFromBookInfo: Boolean = false): List<BookChapter> {
+        storageDirectory("data", userNameSpace, book.name + "_" + book.author)
+        val md5Encode = getChapterListStorageKey(book, userNameSpace)
         var chapterList: JsonArray? = asJsonArray(getUserStorage(userNameSpace, book.name + "_" + book.author, md5Encode))
 
         if (chapterList == null || refresh) {
@@ -1797,7 +1864,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
                 newChapterList = LocalBook.getChapterList(book)
             } else {
                 try {
-                    newChapterList = WebBook(bookSource, debugLog).getChapterList(book)
+                    newChapterList = WebBook(bookSource, debugLog, userNameSpace = userNameSpace).getChapterList(book, isFromBookInfo)
                 } catch(e: Exception) {
                     if (!bookSource.isNullOrEmpty()) {
                         var bookSourceObject = asJsonObject(bookSource)?.mapTo(BookSource::class.java)
@@ -1810,7 +1877,16 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
                     throw e
                 }
             }
-            saveUserStorage(userNameSpace, getRelativePath(book.name + "_" + book.author, md5Encode), newChapterList)
+            userStorageTransaction(userNameSpace, getRelativePath(book.name + "_" + book.author, md5Encode)) {
+                val previous = asJsonArray(getUserStorage(userNameSpace, book.name + "_" + book.author, md5Encode))
+                val oldChapters = if (previous == null) emptyList() else (0 until previous.size()).map {
+                    previous.getJsonObject(it).mapTo(BookChapter::class.java)
+                }
+                if (!book.isLocalBook()) {
+                    com.htmake.reader.api.service.ChapterCache.reconcile(getChapterCacheDir(book, userNameSpace), oldChapters, newChapterList)
+                }
+                saveUserStorage(userNameSpace, getRelativePath(book.name + "_" + book.author, md5Encode), newChapterList)
+            }
             saveShelfBookLatestChapter(book, newChapterList, userNameSpace, mutex)
             return newChapterList
         }
@@ -1825,7 +1901,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
     suspend fun getBookSourceString(context: RoutingContext, sourceUrl: String = ""): String? {
         var bookSourceString: String? = null
         if (context.request().method() == HttpMethod.POST) {
-            var bookSource = context.bodyAsJson.getJsonObject("bookSource")
+            var bookSource = context.body().asJsonObject().getJsonObject("bookSource")
             if (bookSource != null) {
                 bookSourceString = bookSource.toString()
             }
@@ -1834,7 +1910,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         if (bookSourceString.isNullOrEmpty()) {
             var bookSourceUrl: String
             if (context.request().method() == HttpMethod.POST) {
-                bookSourceUrl = context.bodyAsJson.getString("bookSourceUrl", "")
+                bookSourceUrl = context.body().asJsonObject().getString("bookSourceUrl", "")
             } else {
                 bookSourceUrl = context.queryParam("bookSourceUrl").firstOrNull() ?: ""
             }
@@ -1909,11 +1985,25 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         return null
     }
 
-    fun saveShelfBookProgress(book: Book, bookChapter: BookChapter, userNameSpace: String) {
+    fun saveShelfBookProgress(book: Book, bookChapter: BookChapter, userNameSpace: String, chapterPos: Int? = null,
+                              savedAt: Long = System.currentTimeMillis()) {
         editShelfBook(book, userNameSpace) { existBook ->
+            val position = chapterPos ?: if (existBook.durChapterIndex == bookChapter.index) existBook.durChapterPos else 0
+            val incoming = existBook.copy(durChapterIndex = bookChapter.index, durChapterPos = position, durChapterTime = savedAt)
+            if (!com.htmake.reader.api.service.ReadingPosition.shouldApply(existBook, incoming)) {
+                book.durChapterIndex = existBook.durChapterIndex
+                book.durChapterPos = existBook.durChapterPos
+                book.durChapterTime = existBook.durChapterTime
+                return@editShelfBook existBook
+            }
             existBook.durChapterIndex = bookChapter.index
+            existBook.durChapterPos = position
             existBook.durChapterTitle = bookChapter.title
-            existBook.durChapterTime = System.currentTimeMillis()
+            existBook.durChapterTime = savedAt
+            book.durChapterIndex = existBook.durChapterIndex
+            book.durChapterPos = existBook.durChapterPos
+            book.durChapterTime = existBook.durChapterTime
+            book.durChapterTitle = existBook.durChapterTitle
 
             // logger.info("saveShelfBookProgress: {}", existBook)
 
@@ -1944,7 +2034,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         }
     }
 
-    fun editShelfBook(book: Book, userNameSpace: String, handler: (Book)->Book) {
+    fun editShelfBook(book: Book, userNameSpace: String, handler: (Book)->Book) = userStorageTransaction(userNameSpace, "bookshelf") {
         var bookshelf: JsonArray? = asJsonArray(getUserStorage(userNameSpace, "bookshelf"))
         if (bookshelf == null) {
             bookshelf = JsonArray()
@@ -1959,7 +2049,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
                 break;
             }
             // 根据作者和书名查找
-            if (book.name.isNotEmpty() && _book.name.equals(book.name) && book.author.isNotEmpty() && _book.author.equals(book.author)) {
+            if (book.name.isNotEmpty() && _book.name.equals(book.name) && _book.author.equals(book.author)) {
                 existIndex = i
                 break;
             }
@@ -1981,36 +2071,38 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         if (book.name.isEmpty()) {
             return;
         }
-        var bookSourceList = JsonArray()
-        if (!replace) {
-            val localBookSourceList = asJsonArray(getUserStorage(userNameSpace, book.name + "_" + book.author, "bookSource"))
-            if (localBookSourceList != null) {
-                bookSourceList = localBookSourceList
-            }
-        }
-
-        for (k in 0 until sourceList.size) {
-            var searchBook = sourceList.get(k)
-            // 遍历判断书本是否存在
-            var existIndex: Int = -1
-            for (i in 0 until bookSourceList.size()) {
-                var _searchBook = bookSourceList.getJsonObject(i).mapTo(SearchBook::class.java)
-                if (_searchBook.bookUrl.equals(searchBook.bookUrl)) {
-                    existIndex = i
-                    break;
+        userStorageTransaction(userNameSpace, getRelativePath(book.name + "_" + book.author, "bookSource")) {
+            var bookSourceList = JsonArray()
+            if (!replace) {
+                val localBookSourceList = asJsonArray(getUserStorage(userNameSpace, book.name + "_" + book.author, "bookSource"))
+                if (localBookSourceList != null) {
+                    bookSourceList = localBookSourceList
                 }
             }
-            if (existIndex >= 0) {
-                var _sourceList = bookSourceList.getList()
-                _sourceList.set(existIndex, JsonObject.mapFrom(searchBook))
-                bookSourceList = JsonArray(_sourceList)
-            } else {
-                bookSourceList.add(JsonObject.mapFrom(searchBook))
-            }
-        }
 
-        // logger.info("bookSourceList: {}", bookSourceList)
-        saveUserStorage(userNameSpace, getRelativePath(book.name + "_" + book.author, "bookSource"), bookSourceList)
+            for (k in 0 until sourceList.size) {
+                var searchBook = sourceList.get(k)
+                // 遍历判断书本是否存在
+                var existIndex: Int = -1
+                for (i in 0 until bookSourceList.size()) {
+                    var _searchBook = bookSourceList.getJsonObject(i).mapTo(SearchBook::class.java)
+                    if (_searchBook.origin == searchBook.origin && _searchBook.bookUrl == searchBook.bookUrl) {
+                        existIndex = i
+                        break;
+                    }
+                }
+                if (existIndex >= 0) {
+                    var _sourceList = bookSourceList.getList()
+                    _sourceList.set(existIndex, JsonObject.mapFrom(searchBook))
+                    bookSourceList = JsonArray(_sourceList)
+                } else {
+                    bookSourceList.add(JsonObject.mapFrom(searchBook))
+                }
+            }
+
+            // logger.info("bookSourceList: {}", bookSourceList)
+            saveUserStorage(userNameSpace, getRelativePath(book.name + "_" + book.author, "bookSource"), bookSourceList)
+        }
     }
 
     fun extractEpub(book: Book, force: Boolean = false): Boolean {
@@ -2062,15 +2154,17 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         if (progressFile == null) {
             return
         }
-        var book = asJsonObject(progressFile.readText())?.mapTo(Book::class.java)
+        val progress = asJsonObject(progressFile.readText())
+        var book = progress?.mapTo(Book::class.java)?.apply { durChapterTime = progress.getLong("durChapterTime", 0L) }
         if (book != null) {
             editShelfBook(book, userNameSpace) { existBook ->
+                if (!com.htmake.reader.api.service.ReadingPosition.shouldApply(existBook, book)) return@editShelfBook existBook
                 existBook.durChapterIndex = book.durChapterIndex
                 existBook.durChapterPos = book.durChapterPos
                 existBook.durChapterTime = book.durChapterTime
                 existBook.durChapterTitle = book.durChapterTitle
 
-                logger.info("syncShelfBookProgress: {}", existBook)
+                logger.info { "syncShelfBookProgress: ${existBook}" }
                 existBook
             }
         }
@@ -2082,181 +2176,136 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         if (!bookProgressDir.exists()) {
             bookProgressDir = File(userHome + File.separator + "legado" + File.separator + "bookProgress")
             if (!bookProgressDir.exists()) {
-                return
+                bookProgressDir = File(userHome, "bookProgress")
+                check(bookProgressDir.mkdirs() || bookProgressDir.isDirectory) { "创建进度目录失败" }
             }
         }
         var progressFile = File(bookProgressDir.toString() + File.separator + book.name + "_" + book.author + ".json")
         progressFile.writeText(jsonEncode(mapOf(
             "name" to book.name,
             "author" to book.author,
-            "durChapterIndex" to bookChapter.index,
-            "durChapterPos" to 0,
-            "durChapterTime" to System.currentTimeMillis(),
-            "durChapterTitle" to bookChapter.title
+            "durChapterIndex" to book.durChapterIndex,
+            "durChapterPos" to book.durChapterPos,
+            "durChapterTime" to book.durChapterTime,
+            "durChapterTitle" to (book.durChapterTitle ?: bookChapter.title)
         ), true))
     }
 
-    suspend fun syncFromWebdav(zipFilePath: String, userNameSpace: String): Boolean {
-        var descDir = getWorkDir("storage", "data", userNameSpace, "tmp")
-        var descDirFile = File(descDir)
-        try {
-            val userHome = getUserWebdavHome(userNameSpace)
-            var zipFile = File(zipFilePath)
-            if (!zipFile.exists()) {
-                return false
-            }
-            descDirFile.deleteRecursively()
-            if (zipFile.unzip(descDir)) {
-                // 同步 书源
-                val bookSourceFile = File(descDir + File.separator + "bookSource.json")
-                if (bookSourceFile.exists()) {
-                    val userBookSourceFile = File(getWorkDir("storage", "data", userNameSpace, "bookSource.json"))
-                    userBookSourceFile.deleteRecursively()
-                    bookSourceFile.renameTo(userBookSourceFile)
-                }
-                // 同步 书架
-                val bookshelfFile = File(descDir + File.separator + "bookshelf.json")
-                if (bookshelfFile.exists()) {
-                    val userBookSourceFile = File(getWorkDir("storage", "data", userNameSpace, "bookshelf.json"))
-                    userBookSourceFile.deleteRecursively()
-                    bookshelfFile.renameTo(userBookSourceFile)
-                }
-                // 同步 书籍分组
-                val bookGroupFile = File(descDir + File.separator + "bookGroup.json")
-                if (bookGroupFile.exists()) {
-                    val userBookGroupFile = File(getWorkDir("storage", "data", userNameSpace, "bookGroup.json"))
-                    userBookGroupFile.deleteRecursively()
-                    bookGroupFile.renameTo(userBookGroupFile)
-                }
-                // 同步 RSS订阅
-                val rssSourcesFile = File(descDir + File.separator + "rssSources.json")
-                if (rssSourcesFile.exists()) {
-                    val userRssSourcesFile = File(getWorkDir("storage", "data", userNameSpace, "rssSources.json"))
-                    userRssSourcesFile.deleteRecursively()
-                    rssSourcesFile.renameTo(userRssSourcesFile)
-                }
-                // 同步 替换规则
-                val replaceRuleFile = File(descDir + File.separator + "replaceRule.json")
-                if (replaceRuleFile.exists()) {
-                    val userReplaceRuleFile = File(getWorkDir("storage", "data", userNameSpace, "replaceRule.json"))
-                    userReplaceRuleFile.deleteRecursively()
-                    replaceRuleFile.renameTo(userReplaceRuleFile)
-                }
-                // 同步 书签
-                val bookmarkFile = File(descDir + File.separator + "bookmark.json")
-                if (bookmarkFile.exists()) {
-                    val userBookmarkFile = File(getWorkDir("storage", "data", userNameSpace, "bookmark.json"))
-                    userBookmarkFile.deleteRecursively()
-                    bookmarkFile.renameTo(userBookmarkFile)
-                }
-                // 同步阅读进度
-                var bookProgressDir = File(userHome + File.separator + "bookProgress")
-                if (!bookProgressDir.exists()) {
-                    bookProgressDir = File(userHome + File.separator +  "legado" + File.separator +  "bookProgress")
-                }
-                if (bookProgressDir.exists() && bookProgressDir.isDirectory()) {
-                    bookProgressDir.listFiles().forEach{
-                        syncBookProgressFromWebdav(it, userNameSpace)
-                    }
-                }
-                return true
-            }
-        } catch(e: Exception) {
-            e.printStackTrace()
-        } finally {
-            descDirFile.deleteRecursively()
+    private suspend fun backupRoots(user: String): Map<String, File> {
+        val roots = linkedMapOf(
+            "data" to File(com.htmake.reader.utils.getStoragePath(), "data/$user"),
+            "advanced" to File(com.htmake.reader.utils.getStoragePath(), "advanced/" + java.security.MessageDigest.getInstance("SHA-256").digest(user.toByteArray()).joinToString("") { "%02x".format(it.toInt() and 255) }),
+            "assets" to File(getWorkDir("storage", "assets", user))
+        )
+        val sourceJson = getUserStorage(user, "bookSource")
+        val sources = sourceJson?.let { runCatching { JsonArray(it) }.getOrNull() } ?: JsonArray()
+        for (index in 0 until sources.size()) {
+            val url = sources.getJsonObject(index).getString("bookSourceUrl") ?: continue
+            val ns = io.legado.app.help.source.SourceStorage.namespace(user, url)
+            roots["source-$ns"] = File(com.htmake.reader.init.appCtx.cacheDir, "source-state/$ns")
+            roots["source-file-$ns"] = File(com.htmake.reader.init.appCtx.cacheDir, "source/$ns")
         }
-        return true;
+        val rss = getUserStorage(user, "rssSources")?.let { runCatching { JsonArray(it) }.getOrNull() } ?: JsonArray()
+        for (index in 0 until rss.size()) {
+            val url = rss.getJsonObject(index).getString("sourceUrl") ?: continue
+            val ns = io.legado.app.help.source.SourceStorage.namespace(user, "rss:" + url)
+            roots["source-$ns"] = File(com.htmake.reader.init.appCtx.cacheDir, "source-state/$ns")
+            roots["source-file-$ns"] = File(com.htmake.reader.init.appCtx.cacheDir, "source/$ns")
+        }
+        return roots
     }
 
-    suspend fun saveToWebdav(latestZipFilePath: String, userNameSpace: String): Boolean {
-        var descDir = getWorkDir("storage", "data", userNameSpace, "tmp")
-        var descDirFile = File(descDir)
-        descDirFile.deleteRecursively()
-        try {
-            val userHome = getUserWebdavHome(userNameSpace)
-            var legadoHome = userHome
-            if (latestZipFilePath.indexOf("legado") > 0) {
-                legadoHome = userHome + File.separator + "legado"
+    suspend fun syncFromWebdav(zipFilePath: String, userNameSpace: String): Boolean = try {
+        val archive = File(zipFilePath)
+        val localRoots = backupRoots(userNameSpace)
+        com.htmake.reader.api.service.BackupArchive.restore(archive, { manifest, values ->
+            val roots = localRoots.toMutableMap()
+            // Read source metadata only after the entire archive passes the decompression limits.
+            values["data/bookSource.json"]?.let { bytes ->
+                val sources = JsonArray(String(bytes, Charsets.UTF_8))
+                val sourceMap = manifest.getJsonObject("metadata")?.getJsonObject("sourceNamespaces") ?: JsonObject()
+                for (index in 0 until sources.size()) {
+                    val url = sources.getJsonObject(index).getString("bookSourceUrl") ?: continue
+                    val imported = sourceMap.getString(url) ?: io.legado.app.help.source.SourceStorage.namespace(userNameSpace, url)
+                    val local = io.legado.app.help.source.SourceStorage.namespace(userNameSpace, url)
+                    roots["source-$imported"] = File(com.htmake.reader.init.appCtx.cacheDir, "source-state/$local")
+                    roots["source-file-$imported"] = File(com.htmake.reader.init.appCtx.cacheDir, "source/$local")
+                }
             }
-            var zipFile = File(latestZipFilePath)
-            if (zipFile.unzip(descDir)) {
-                // 同步 书源
-                val userBookSourceFile = File(getWorkDir("storage", "data", userNameSpace, "bookSource.json"))
-                if (userBookSourceFile.exists()) {
-                    val bookSourceFile = File(descDir + File.separator + "bookSource.json")
-                    bookSourceFile.deleteRecursively()
-                    userBookSourceFile.copyRecursively(bookSourceFile)
+            values["data/rssSources.json"]?.let { bytes ->
+                val rss = JsonArray(String(bytes, Charsets.UTF_8))
+                val sourceMap = manifest.getJsonObject("metadata")?.getJsonObject("sourceNamespaces") ?: JsonObject()
+                for (index in 0 until rss.size()) {
+                    val url = rss.getJsonObject(index).getString("sourceUrl") ?: continue
+                    val imported = sourceMap.getString("rss:" + url) ?: io.legado.app.help.source.SourceStorage.namespace(userNameSpace, "rss:" + url)
+                    val local = io.legado.app.help.source.SourceStorage.namespace(userNameSpace, "rss:" + url)
+                    roots["source-$imported"] = File(com.htmake.reader.init.appCtx.cacheDir, "source-state/$local")
+                    roots["source-file-$imported"] = File(com.htmake.reader.init.appCtx.cacheDir, "source/$local")
                 }
-                // 同步 书架
-                val userBookshelfFile = File(getWorkDir("storage", "data", userNameSpace, "bookshelf.json"))
-                if (userBookshelfFile.exists()) {
-                    val bookshelfFile = File(descDir + File.separator + "bookshelf.json")
-                    bookshelfFile.deleteRecursively()
-                    userBookshelfFile.copyRecursively(bookshelfFile)
-                }
-                // 同步 书籍分组
-                val userBookGroupFile = File(getWorkDir("storage", "data", userNameSpace, "bookGroup.json"))
-                if (userBookGroupFile.exists()) {
-                    val bookGroupFile = File(descDir + File.separator + "bookGroup.json")
-                    bookGroupFile.deleteRecursively()
-                    userBookGroupFile.renameTo(bookGroupFile)
-                }
-                // 同步 RSS订阅
-                val userRssSourcesFile = File(getWorkDir("storage", "data", userNameSpace, "rssSources.json"))
-                if (userRssSourcesFile.exists()) {
-                    val rssSourcesFile = File(descDir + File.separator + "rssSources.json")
-                    rssSourcesFile.deleteRecursively()
-                    userRssSourcesFile.renameTo(rssSourcesFile)
-                }
-                // 同步 替换规则
-                val userReplaceRuleFile = File(getWorkDir("storage", "data", userNameSpace, "replaceRule.json"))
-                if (userReplaceRuleFile.exists()) {
-                    val replaceRuleFile = File(descDir + File.separator + "replaceRule.json")
-                    replaceRuleFile.deleteRecursively()
-                    userReplaceRuleFile.renameTo(replaceRuleFile)
-                }
-                // 同步 书签
-                val userBookmarkFile = File(getWorkDir("storage", "data", userNameSpace, "bookmark.json"))
-                if (userBookmarkFile.exists()) {
-                    val bookmarkFile = File(descDir + File.separator + "bookmark.json")
-                    bookmarkFile.deleteRecursively()
-                    userBookmarkFile.renameTo(bookmarkFile)
-                }
-                // 压缩
-                val today = SimpleDateFormat("yyyy-MM-dd").format(System.currentTimeMillis())
-                return descDirFile.zip(legadoHome + File.separator + "backup" + today + ".zip")
             }
-        } catch(e: Exception) {
-            e.printStackTrace()
-        }  finally {
-            descDirFile.deleteRecursively()
+            roots
+        }) { manifest, path, bytes ->
+            val sourceKey = manifest.getJsonObject("metadata")?.getString("sourceKey")
+            if (path.startsWith("source-") && !path.startsWith("source-file-") && path.substringAfterLast('/') == "loginInfo".hashCode().toString() && sourceKey != null) {
+                val plain = io.legado.app.help.source.SourceSecrets.decryptWithKey(String(bytes, Charsets.UTF_8), java.util.Base64.getDecoder().decode(sourceKey))
+                io.legado.app.help.source.SourceSecrets.encrypt(plain).toByteArray(Charsets.UTF_8)
+            } else if (path == "data/userConfig.json") {
+                val originalUser = manifest.getJsonObject("metadata")?.getString("userNamespace")
+                if (originalUser.isNullOrBlank() || originalUser == userNameSpace) bytes else rebindReadingAssets(bytes, originalUser, userNameSpace)
+            } else bytes
         }
-        return false;
+        io.legado.app.help.http.CookieStore.invalidate()
+        true
+    } catch (error: Exception) { logger.warn(error) { "恢复备份失败" }; false }
+
+    suspend fun saveToWebdav(latestZipFilePath: String, userNameSpace: String): Boolean = try {
+        val home = File(getUserWebdavHome(userNameSpace))
+        val output = File(home, "backup" + SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS").format(System.currentTimeMillis()) + ".zip")
+        val sources = getUserStorage(userNameSpace, "bookSource")?.let { runCatching { JsonArray(it) }.getOrNull() } ?: JsonArray()
+        val namespaces = JsonObject()
+        for (index in 0 until sources.size()) {
+            val url = sources.getJsonObject(index).getString("bookSourceUrl") ?: continue
+            namespaces.put(url, io.legado.app.help.source.SourceStorage.namespace(userNameSpace, url))
+        }
+        val rss = getUserStorage(userNameSpace, "rssSources")?.let { runCatching { JsonArray(it) }.getOrNull() } ?: JsonArray()
+        for (index in 0 until rss.size()) {
+            val url = rss.getJsonObject(index).getString("sourceUrl") ?: continue
+            namespaces.put("rss:" + url, io.legado.app.help.source.SourceStorage.namespace(userNameSpace, "rss:" + url))
+        }
+        val metadata = JsonObject().put("userNamespace", userNameSpace).put("sourceNamespaces", namespaces).put("sourceKey", io.legado.app.help.source.SourceSecrets.exportKey())
+        com.htmake.reader.api.service.BackupArchive.create(output, backupRoots(userNameSpace), metadata)
+        true
+    } catch (error: Exception) { logger.warn(error) { "创建备份失败" }; false }
+
+    private fun rebindReadingAssets(bytes: ByteArray, originalUser: String, restoredUser: String): ByteArray {
+        val config = JsonObject(String(bytes, Charsets.UTF_8))
+        val prefix = "/assets/$originalUser/"
+        fun rebind(value: Any?): Any? = if (value is String && value.startsWith(prefix)) "/assets/$restoredUser/" + value.removePrefix(prefix) else value
+        fun fields(settings: JsonObject?, keys: List<String>) {
+            if (settings == null) return
+            keys.forEach { key -> if (settings.getValue(key) is String) settings.put(key, rebind(settings.getValue(key))) }
+        }
+        fun reading(settings: JsonObject?) = fields(settings, listOf("customFontUrl", "backgroundImage"))
+        fun legacy(settings: JsonObject?) {
+            fields(settings, listOf("contentBGImg"))
+            (settings?.getValue("customFontsMap") as? JsonObject)?.let { fonts -> fonts.fieldNames().toList().forEach { fonts.put(it, rebind(fonts.getValue(it))) } }
+            (settings?.getValue("customBGImgList") as? JsonArray)?.let { images -> for (index in 0 until images.size()) images.set(index, rebind(images.getValue(index))) }
+        }
+        reading(config.getValue("reactReadingSettings") as? JsonObject)
+        (config.getValue("reactAppearance") as? JsonObject)?.let { appearance ->
+            listOf("fonts", "backgrounds").forEach { key -> (appearance.getValue(key) as? JsonArray)?.forEach { item -> fields(item as? JsonObject, listOf("url")) } }
+            (appearance.getValue("profiles") as? JsonArray)?.forEach { item -> reading((item as? JsonObject)?.getValue("settings") as? JsonObject) }
+        }
+        legacy(config.getValue("config") as? JsonObject)
+        (config.getValue("customConfigList") as? JsonArray)?.forEach { item -> legacy(item as? JsonObject) }
+        return config.encode().toByteArray(Charsets.UTF_8)
     }
 
     suspend fun getLastBackFileFromWebdav(userNameSpace: String): String? {
-        val userHome = getUserWebdavHome(userNameSpace)
-        var legadoHome = File(userHome + File.separator + "legado")
-        if (!legadoHome.exists()) {
-            legadoHome = File(userHome)
-        }
-        if (!legadoHome.exists()) {
-            return null
-        }
-        var latestZipFile: String? = null
-        val zipFileReg = Regex("^backup[0-9-]+.zip$", RegexOption.IGNORE_CASE)    //忽略大小写
-        legadoHome.listFiles().also{
-            it.sortByDescending {
-                it.lastModified()
-            }
-        }.forEach {
-            if (zipFileReg.matches(it.name)) {
-                latestZipFile = it.toString()
-                return@forEach
-            }
-        }
-        return latestZipFile
+        val home = File(getUserWebdavHome(userNameSpace))
+        val pattern = Regex("^backup[0-9-]+\\.zip$", RegexOption.IGNORE_CASE)
+        return listOf(home, File(home, "legado")).flatMap { it.listFiles()?.toList().orEmpty() }
+            .filter { it.isFile && pattern.matches(it.name) }.maxByOrNull { it.lastModified() }?.toString()
     }
 
     // 从本地导入文件预览
@@ -2265,11 +2314,11 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         if (!checkAuth(context)) {
             return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
         }
-        var paths = context.bodyAsJson.getJsonArray("path")
+        var paths = context.body().asJsonObject().getJsonArray("path")
         if (paths == null) {
             return returnData.setErrorMsg("参数错误")
         }
-        var webdav = context.bodyAsJson.getBoolean("webdav", false)
+        var webdav = context.body().asJsonObject().getBoolean("webdav", false)
         if (appConfig.secure) {
             var userInfo = context.get("userInfo") as User?
             if (userInfo == null) {
@@ -2293,7 +2342,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             if (path.isNotEmpty()) {
                 path = home + path
                 var file = File(path)
-                logger.info("localFile: {} {}", path, file)
+                logger.info { "localFile: ${path} ${file}" }
                 if (file.exists()) {
                     val fileName = file.name
                     val ext = getFileExt(fileName)
@@ -2344,7 +2393,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         // logger.info("type: {}", type)
         context.fileUploads().forEach {
             var file = File(it.uploadedFileName())
-            logger.info("uploadFile: {} {} {}", it.uploadedFileName(), it.fileName(), file)
+            logger.info { "uploadFile: ${it.uploadedFileName()} ${it.fileName()} ${file}" }
             if (file.exists()) {
                 var fileName = it.fileName()
                 var newFile = File(getWorkDir("storage", "localStore", path, fileName))
@@ -2354,7 +2403,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
                 if (newFile.exists()) {
                     newFile.delete()
                 }
-                logger.info("moveTo: {}", newFile)
+                logger.info { "moveTo: ${newFile}" }
                 if (file.copyRecursively(newFile)) {
                     fileList.add(mapOf(
                         "name" to newFile.name,
@@ -2387,7 +2436,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var path: String
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            path = context.bodyAsJson.getString("path") ?: ""
+            path = context.body().asJsonObject().getString("path") ?: ""
         } else {
             // get 请求
             path = context.queryParam("path").firstOrNull() ?: ""
@@ -2397,7 +2446,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         }
         var home = getWorkDir("storage", "localStore")
         var file = File(home + path)
-        logger.info("file: {} {}", path, file)
+        logger.info { "file: ${path} ${file}" }
         if (!file.exists()) {
             return returnData.setErrorMsg("路径不存在")
         }
@@ -2439,7 +2488,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var path: String
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            path = context.bodyAsJson.getString("path") ?: ""
+            path = context.body().asJsonObject().getString("path") ?: ""
         } else {
             // get 请求
             path = context.queryParam("path").firstOrNull() ?: ""
@@ -2450,7 +2499,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         }
         var home = getWorkDir("storage", "localStore")
         var file = File(home + path)
-        logger.info("file: {} {}", path, file)
+        logger.info { "file: ${path} ${file}" }
         if (!file.exists()) {
             context.success(returnData.setErrorMsg("路径不存在"))
             return
@@ -2480,7 +2529,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var path: String
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            path = context.bodyAsJson.getString("path") ?: ""
+            path = context.body().asJsonObject().getString("path") ?: ""
         } else {
             // get 请求
             path = context.queryParam("path").firstOrNull() ?: ""
@@ -2490,7 +2539,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         }
         var home = getWorkDir("storage", "localStore")
         var file = File(home + path)
-        logger.info("file: {} {}", path, file)
+        logger.info { "file: ${path} ${file}" }
         if (!file.exists()) {
             return returnData.setErrorMsg("路径不存在")
         }
@@ -2515,7 +2564,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         if (!checkManagerAuth(context)) {
             return returnData.setData("NEED_SECURE_KEY").setErrorMsg("请输入管理密码")
         }
-        var path = context.bodyAsJson.getJsonArray("path")
+        var path = context.body().asJsonObject().getJsonArray("path")
         if (path == null) {
             return returnData.setErrorMsg("参数错误")
         }
@@ -2564,18 +2613,37 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             return
         }
 
-        logger.info("bookSourceDebugSSE bookSource: {} keyword: {}", bookSourceString, keyword)
+        logger.info { "bookSourceDebugSSE sourceUrl: ${bookSourceUrl} keyword: ${keyword}" }
 
+        val debugId = context.queryParam("debugId").firstOrNull() ?: UUID.randomUUID().toString()
+        require(debugId.matches(Regex("[A-Za-z0-9_-]{1,80}"))) { "调试标识不合法" }
+        val key = "$userNameSpace:$debugId"
+        val requestJob = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
+        if (requestJob != null) sourceDebugJobs.put(key, requestJob)?.cancel()
+        response.closeHandler { requestJob?.cancel() }
         val debugger = Debugger { msg ->
-            response.write("data: " + jsonEncode(mapOf("msg" to msg), false) + "\n\n")
+            if (!response.closed()) response.write("data: " + jsonEncode(mapOf("msg" to msg), false) + "\n\n")
         }
+        try {
+            withContext(Dispatchers.IO + io.legado.app.model.jsSource.SourceScriptRuntime.cancellationContext(requireNotNull(requestJob))) {
+                debugger.startDebug(WebBook(bookSourceString, userNameSpace = userNameSpace), keyword)
+            }
+            if (!response.closed()) {
+                response.write("event: end\n")
+                response.end("data: " + jsonEncode(mapOf("end" to true), false) + "\n\n")
+            }
+        } finally {
+            if (requestJob != null) sourceDebugJobs.remove(key, requestJob)
+        }
+    }
 
-        val webBook = WebBook(bookSourceString)
-
-        debugger.startDebug(webBook, keyword)
-
-        response.write("event: end\n")
-        response.end("data: " + jsonEncode(mapOf("end" to true), false) + "\n\n")
+    suspend fun cancelBookSourceDebug(context: RoutingContext): ReturnData {
+        if (!checkAuth(context)) return ReturnData().setErrorMsg("请登录后使用")
+        val id = context.body().asJsonObject().getString("debugId", "")
+        require(id.matches(Regex("[A-Za-z0-9_-]{1,80}"))) { "调试标识不合法" }
+        val job = sourceDebugJobs.remove("${getUserNameSpace(context)}:$id")
+        job?.cancel()
+        return ReturnData().setData(mapOf("cancelled" to (job != null)))
     }
 
     suspend fun cacheBookSSE(context: RoutingContext) {
@@ -2595,14 +2663,14 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var concurrentCount: Int
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            bookUrl = context.bodyAsJson.getString("url") ?: context.bodyAsJson.getString("bookUrl") ?: ""
-            refresh = context.bodyAsJson.getInteger("refresh", 0)
-            concurrentCount = context.bodyAsJson.getInteger("concurrentCount", 24)
+            bookUrl = context.body().asJsonObject().getString("url") ?: context.body().asJsonObject().getString("bookUrl") ?: ""
+            refresh = context.body().asJsonObject().getInteger("refresh", 0)
+            concurrentCount = context.body().asJsonObject().getInteger("concurrentCount", 24)
         } else {
             // get 请求
             bookUrl = context.queryParam("url").firstOrNull() ?: ""
-            refresh = context.queryParam("refresh").firstOrNull()?.toInt() ?: 0
-            concurrentCount = context.queryParam("concurrentCount").firstOrNull()?.toInt() ?: 24
+            refresh = context.queryParam("refresh").firstOrNull()?.toIntOrNull() ?: 0
+            concurrentCount = context.queryParam("concurrentCount").firstOrNull()?.toIntOrNull() ?: 4
         }
         if (bookUrl.isNullOrEmpty()) {
             response.write("event: error\n")
@@ -2617,6 +2685,8 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             response.end("data: " + jsonEncode(returnData.setErrorMsg("请先加入书架"), false) + "\n\n")
             return
         }
+        bookInfo.setRootDir(getWorkDir())
+        bookInfo.setUserNameSpace(userNameSpace)
         if (bookInfo.isLocalBook()) {
             response.write("event: error\n")
             response.end("data: " + jsonEncode(returnData.setErrorMsg("本地书籍无需缓存"), false) + "\n\n")
@@ -2629,73 +2699,39 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             return
         }
 
-        var chapterList = getLocalChapterList(bookInfo, bookSource, false, userNameSpace)
-        var cachedChapterContentSet = mutableSetOf<Int>()
-        if (refresh <= 0) {
-            cachedChapterContentSet = getCachedChapterContentSet(bookInfo, userNameSpace)
+        if (bookInfo.type != io.legado.app.constant.BookType.default) {
+            response.end("event: error\ndata: " + jsonEncode(returnData.setErrorMsg("该书籍类型不支持章节文字导出"), false) + "\n\n")
+            return
         }
-        val localCacheDir = getChapterCacheDir(bookInfo, userNameSpace)
-        var isEnd = false
-        var successCount = 0;
-        var failedCount = 0;
-
-        context.request().connection().closeHandler{
-            logger.info("客户端已断开链接，停止 cacheBookSSE")
-            isEnd = true
-        }
-
-        concurrentCount = if(concurrentCount > 0) concurrentCount else 24
-        logger.info("cacheBookSSE concurrentCount: {} refresh: {}", concurrentCount, refresh)
-        limitConcurrent(concurrentCount, 0, chapterList.size, {it->
-            if (!cachedChapterContentSet.contains(it)) {
-                val chapterIndex = it
-                var chapterInfo = chapterList.get(it)
-                try {
-                    var nextChapterUrl: String? = null
-                    if (chapterIndex + 1 < chapterList.size) {
-                        var nextChapterInfo = chapterList.get(chapterIndex + 1)
-                        nextChapterUrl = nextChapterInfo.url
-                    }
-                    var content = WebBook(bookSource, appConfig.debugLog).getBookContent(bookInfo, chapterInfo, nextChapterUrl)
-                    var chapterCacheFile = File(localCacheDir.absolutePath + File.separator + chapterIndex + ".txt")
-                    chapterCacheFile.writeText(content)
-                    // 保存图片
-                    BookHelp.saveImages(
-                        this,
-                        BookSource.fromJson(bookSource).getOrNull() ?: BookSource(),
-                        bookInfo,
-                        chapterInfo,
-                        content
-                    )
-                    successCount++;
-                    cachedChapterContentSet.add(chapterIndex)
-                } catch(e: Exception) {
-                    isEnd = true
-                    failedCount++
+        try {
+            val chapterList = getLocalChapterList(bookInfo, bookSource, false, userNameSpace)
+            val localCacheDir = getChapterCacheDir(bookInfo, userNameSpace)
+            val source = BookSource.fromJson(bookSource, userNameSpace).getOrThrow()
+            val webBook = WebBook(source, appConfig.debugLog, userNameSpace = userNameSpace)
+            val requestJob = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
+            response.closeHandler { requestJob?.cancel() }
+            val progress = com.htmake.reader.api.service.ChapterCache.download(
+                chapterList, localCacheDir, concurrentCount, refresh > 0,
+                { update -> response.write("data: " + jsonEncode(update, false) + "\n\n").coAwait() }
+            ) { index ->
+                val chapter = chapterList[index]
+                val edit = com.htmake.reader.api.service.ChapterEdits.read(localCacheDir, chapter)
+                if (edit != null) {
+                    com.htmake.reader.api.service.ChapterEdits.apply(localCacheDir, chapter, edit)
+                    edit.getString("content")
+                } else {
+                    val content = webBook.getBookContent(bookInfo, chapter, chapterList.getOrNull(index + 1)?.url)
+                    com.htmake.reader.api.service.ChapterMetadata.save(localCacheDir, chapter)
+                    BookHelp.saveImages(CoroutineScope(kotlinx.coroutines.currentCoroutineContext()), source, bookInfo, chapter, content)
+                    content
                 }
             }
-            it
-        }) {list, loopCount ->
-            if (isEnd) {
-                false
-            } else {
-                // 返回本轮数据
-                val result = mapOf(
-                    "cachedCount" to cachedChapterContentSet.size,
-                    "successCount" to successCount,
-                    "failedCount" to failedCount
-                )
-                response.write("data: " + jsonEncode(result, false) + "\n\n")
-                logger.info("Loog: {} list.size: {} result: {}", loopCount, list.size, result)
-                true
-            }
+            if (!response.closed()) response.end("event: end\ndata: " + jsonEncode(progress, false) + "\n\n").coAwait()
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            if (!response.closed()) response.end("event: error\ndata: " + jsonEncode(returnData.setErrorMsg(error.message ?: "章节缓存失败"), false) + "\n\n").coAwait()
         }
-        response.write("event: end\n")
-        response.end("data: " + jsonEncode(mapOf(
-            "cachedCount" to cachedChapterContentSet.size,
-            "successCount" to successCount,
-            "failedCount" to failedCount
-        ), false) + "\n\n")
     }
 
     suspend fun deleteBookCache(context: RoutingContext): ReturnData {
@@ -2706,7 +2742,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var bookUrl: String
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            bookUrl = context.bodyAsJson.getString("url") ?: context.bodyAsJson.getString("bookUrl") ?: ""
+            bookUrl = context.body().asJsonObject().getString("url") ?: context.body().asJsonObject().getString("bookUrl") ?: ""
         } else {
             // get 请求
             bookUrl = context.queryParam("url").firstOrNull() ?: ""
@@ -2724,30 +2760,32 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             return returnData.setErrorMsg("本地书籍无需删除缓存")
         }
         val localCacheDir = getChapterCacheDir(bookInfo, userNameSpace)
-        localCacheDir.deleteRecursively()
+        com.htmake.reader.api.service.ChapterEdits.clearCache(localCacheDir)
 
         return returnData.setData("")
     }
 
     fun getChapterCacheDir(bookInfo: Book, userNameSpace: String): File {
-        val md5Encode = MD5Utils.md5Encode(bookInfo.bookUrl).toString()
-        val localCacheDirPath = getWorkDir("storage", "data", userNameSpace, bookInfo.name + "_" + bookInfo.author, md5Encode)
-        val localCacheDir = File(localCacheDirPath)
-        if (!localCacheDir.exists()) {
-            localCacheDir.mkdirs()
-        }
-        return localCacheDir
+        val root = storageDirectory("data", userNameSpace, bookInfo.name + "_" + bookInfo.author)
+        val legacyOrigin = getShelfBookByURL(bookInfo.bookUrl, userNameSpace)?.origin ?: bookInfo.origin
+        return com.htmake.reader.api.service.ChapterCache.directory(bookInfo, root, legacyOrigin)
+    }
+
+    private fun getChapterListStorageKey(book: Book, userNameSpace: String): String {
+        val directory = getChapterCacheDir(book, userNameSpace)
+        return if (directory.parentFile.name == ".sources") {
+            getRelativePath(directory.parentFile.parentFile.name, ".sources", directory.name, "catalog")
+        } else directory.name
     }
 
     fun getCachedChapterContentSet(bookInfo: Book, userNameSpace: String): MutableSet<Int> {
         val localCacheDir = getChapterCacheDir(bookInfo, userNameSpace)
-        val cachedChapterContentSet = mutableSetOf<Int>()
-        localCacheDir.listFiles().forEach{
-            if (!it.name.startsWith(".") && it.name.endsWith(".txt")) {
-                cachedChapterContentSet.add(it.name.replace(".txt", "").toInt())
-            }
+        val md5 = getChapterListStorageKey(bookInfo, userNameSpace)
+        val chapters = asJsonArray(getUserStorage(userNameSpace, bookInfo.name + "_" + bookInfo.author, md5)) ?: return mutableSetOf()
+        return (0 until chapters.size()).filterTo(mutableSetOf()) { index ->
+            val chapter = chapters.getJsonObject(index).mapTo(BookChapter::class.java)
+            index < bookInfo.totalChapterNum && com.htmake.reader.api.service.ChapterCache.valid(localCacheDir, index, chapter)
         }
-        return cachedChapterContentSet
     }
 
     suspend fun getShelfBookWithCacheInfo(context: RoutingContext): ReturnData {
@@ -2782,8 +2820,8 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var isEpub: Int
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            bookUrl = context.bodyAsJson.getString("url") ?: context.bodyAsJson.getString("bookUrl") ?: ""
-            isEpub = context.bodyAsJson.getInteger("isEpub", 0)
+            bookUrl = context.body().asJsonObject().getString("url") ?: context.body().asJsonObject().getString("bookUrl") ?: ""
+            isEpub = context.body().asJsonObject().getInteger("isEpub", 0)
         } else {
             // get 请求
             bookUrl = context.queryParam("url").firstOrNull() ?: ""
@@ -2801,6 +2839,8 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             context.success(returnData.setErrorMsg("请先加入书架"))
             return
         }
+        bookInfo.setRootDir(getWorkDir())
+        bookInfo.setUserNameSpace(userNameSpace)
 
         if (bookInfo.isLocalBook()) {
             val localFile = bookInfo.getLocalFile()
@@ -2814,288 +2854,172 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             context.success(returnData.setErrorMsg("未配置书源"))
             return
         }
-        var exportDir = File(getWorkDir("storage", "assets", userNameSpace, "export"))
-
-        val bookFile = if (isEpub > 0) {
-            exportToEpub(exportDir, bookInfo, bookSource, userNameSpace)
-        } else {
-            exportToTxt(exportDir, bookInfo, bookSource, userNameSpace)
+        if (bookInfo.type != io.legado.app.constant.BookType.default) {
+            context.success(returnData.setErrorMsg("该书籍类型不支持 TXT/EPUB 导出"))
+            return
         }
-        context.response().putHeader("Cache-Control", "300")
-                        .putHeader("Content-Disposition", "attachment; filename=" + URLEncoder.encode(bookFile.name, "UTF-8"))
-                        .sendFile(bookFile.toString())
+        val chapters = getLocalChapterList(bookInfo, bookSource, false, userNameSpace)
+        val missing = com.htmake.reader.api.service.ChapterCache.missing(chapters, getChapterCacheDir(bookInfo, userNameSpace))
+        if (chapters.isEmpty() || missing.isNotEmpty()) {
+            context.success(returnData.setErrorMsg("请先缓存全部章节，尚有 ${missing.size} 章未缓存或正文为空"))
+            return
+        }
+        val exportDir = File(getStoragePath(), "cache/exports/$userNameSpace/${UUID.randomUUID()}")
+        try {
+            val useReplace = if (context.request().method() == HttpMethod.POST) context.body().asJsonObject().getBoolean("useReplace", appConfig.exportUseReplace)
+                else context.queryParam("useReplace").firstOrNull()?.toBooleanStrictOrNull() ?: appConfig.exportUseReplace
+            val useTemplate = if (context.request().method() == HttpMethod.POST) context.body().asJsonObject().getBoolean("useTemplate", true)
+                else context.queryParam("useTemplate").firstOrNull()?.toBooleanStrictOrNull() ?: true
+            val filterInteractiveImages = if (context.request().method() == HttpMethod.POST) context.body().asJsonObject().getBoolean("filterInteractiveImages", true)
+                else context.queryParam("filterInteractiveImages").firstOrNull()?.toBooleanStrictOrNull() ?: true
+            val bookFile = if (isEpub > 0) exportToEpub(exportDir, bookInfo, bookSource, userNameSpace, useReplace, useTemplate, filterInteractiveImages)
+                else exportToTxt(exportDir, bookInfo, bookSource, userNameSpace, useReplace)
+            val filename = URLEncoder.encode(bookFile.name, "UTF-8").replace("+", "%20")
+            context.response()
+                .putHeader("Content-Type", if (isEpub > 0) "application/epub+zip" else "text/plain; charset=${appConfig.exportCharset}")
+                .putHeader("Cache-Control", "no-store")
+                .putHeader("Content-Disposition", "attachment; filename*=UTF-8''$filename")
+                .sendFile(bookFile.toString()).coAwait()
+        } finally {
+            // The directory is unique to this generated download, never a user data directory.
+            exportDir.deleteRecursively()
+        }
     }
 
-    suspend fun exportToTxt(exportDir: File, bookInfo: Book, bookSource: String, userNameSpace: String): File {
-        val filename = "《${bookInfo.name}》作者：${bookInfo.getRealAuthor()}.txt"
-        val bookPath = FileUtils.getPath(exportDir, filename)
-        val bookFile = FileUtils.createFileWithReplace(bookPath)
-        // val stringBuilder = StringBuilder()
-        getAllContents(bookInfo, bookSource, userNameSpace) { text, srcList ->
-            bookFile.appendText(text, Charset.forName(appConfig.exportCharset))
-            // stringBuilder.append(text)
-            // srcList?.forEach {
-            //     val vFile = BookHelp.getImage(bookInfo, it.third)
-            //     if (vFile.exists()) {
-            //         FileUtils.createFileIfNotExist(
-            //             exportDir,
-            //             "${book.name}_${book.author}",
-            //             "images",
-            //             it.first,
-            //             "${it.second}-${MD5Utils.md5Encode16(it.third)}.jpg"
-            //         ).writeBytes(vFile.readBytes())
-            //     }
-            // }
+    private fun exportFilename(book: Book, extension: String): String =
+        "《${book.name}》作者：${book.getRealAuthor()}".replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), "_").take(150).trimEnd('.', ' ') + ".$extension"
+
+    private fun exportRules(user: String, enabled: Boolean): List<io.legado.app.data.entities.ReplaceRule> {
+        if (!enabled) return emptyList()
+        val array = getUserStorage(user, "replaceRule")?.let { runCatching { JsonArray(it) }.getOrNull() } ?: JsonArray()
+        return (0 until array.size()).mapNotNull { runCatching { array.getJsonObject(it).mapTo(io.legado.app.data.entities.ReplaceRule::class.java) }.getOrNull() }
+    }
+
+    suspend fun exportToTxt(exportDir: File, bookInfo: Book, bookSource: String, userNameSpace: String, useReplace: Boolean = appConfig.exportUseReplace): File {
+        val bookFile = FileUtils.createFileWithReplace(FileUtils.getPath(exportDir, exportFilename(bookInfo, "txt")))
+        val rules = exportRules(userNameSpace, useReplace && bookInfo.useReplaceRule)
+        bookFile.appendText("${bookInfo.name}\n作者：${bookInfo.getRealAuthor()}\n简介：${HtmlFormatter.format(bookInfo.getDisplayIntro())}\n", Charset.forName(appConfig.exportCharset))
+        val chapters = getLocalChapterList(bookInfo, bookSource, false, userNameSpace)
+        val cache = getChapterCacheDir(bookInfo, userNameSpace)
+        chapters.forEachIndexed { index, chapter ->
+            com.htmake.reader.api.service.ChapterEdits.apply(cache, chapter)
+            val text = checkNotNull(com.htmake.reader.api.service.ChapterCache.read(cache, index, chapter)) { "章节缓存缺失：${chapter.title}，请重新缓存全部章节" }
+            val title = com.htmake.reader.api.service.ContentReplacement.apply(com.htmake.reader.api.service.ChapterMetadata.read(cache, chapter).getString("title", chapter.title), rules, bookInfo, title = true)
+            val body = AppPattern.imgPattern.matcher(com.htmake.reader.api.service.ContentReplacement.apply(text, rules, bookInfo)).replaceAll("")
+            bookFile.appendText("\n\n" + (if (appConfig.exportNoChapterName) "" else "$title\n") + body + "\n", Charset.forName(appConfig.exportCharset))
         }
         return bookFile
     }
 
-    private suspend fun getAllContents(
-        book: Book,
-        bookSourceString: String,
-        userNameSpace: String,
-        append: (text: String, srcList: ArrayList<Triple<String, Int, String>>?) -> Unit
-    ) {
-        // val useReplace = appConfig.exportUseReplace && book.getUseReplaceRule()
-        // val contentProcessor = ContentProcessor.get(book.name, book.origin)
-        val qy = "${book.name}\n作者：${
-            book.getRealAuthor()
-        }\n简介：${
-            HtmlFormatter.format(book.getDisplayIntro())
-        }"
-
-        append(qy, null)
-        var chapterList = getLocalChapterList(book, bookSourceString, false, userNameSpace)
-        val localCacheDir = getChapterCacheDir(book, userNameSpace)
-
-        chapterList.forEachIndexed { index, chapter ->
-            var chapterCacheFile = File(localCacheDir.absolutePath + File.separator + index + ".txt")
-            var content = ""
-            if (!appConfig.exportNoChapterName) {
-                content += chapter.title + "\n"
-            }
-            if (chapterCacheFile.exists()) {
-                content += chapterCacheFile.readText() + "\n"
-            } else {
-                content += "暂无缓存内容。\n"
-            }
-
-            append.invoke("\n\n$content", null)
-
-            // BookHelp.getContent(book, chapter).let { content ->
-            //     val content1 = contentProcessor
-            //         .getContent(
-            //             book,
-            //             chapter,
-            //             content ?: "null",
-            //             includeTitle = !appConfig.exportNoChapterName,
-            //             useReplace = useReplace,
-            //             chineseConvert = false,
-            //             reSegment = false
-            //         ).joinToString("\n")
-            //     if (appConfig.exportPictureFile) {
-            //         //txt导出图片文件
-            //         val srcList = arrayListOf<Triple<String, Int, String>>()
-            //         content?.split("\n")?.forEachIndexed { index, text ->
-            //             val matcher = AppPattern.imgPattern.matcher(text)
-            //             while (matcher.find()) {
-            //                 matcher.group(1)?.let {
-            //                     val src = NetworkUtils.getAbsoluteURL(chapter.url, it)
-            //                     srcList.add(Triple(chapter.title, index, src))
-            //                 }
-            //             }
-            //         }
-            //         append.invoke("\n\n$content1", srcList)
-            //     } else {
-            //         append.invoke("\n\n$content1", null)
-            //     }
-            // }
-        }
-    }
-
-    private suspend fun exportToEpub(exportDir: File, book: Book, bookSource: String, userNameSpace: String): File {
-        val filename = "《${book.name}》作者：${book.getRealAuthor()}.epub"
-        val bookPath = FileUtils.getPath(exportDir, filename)
-        val bookFile = FileUtils.createFileWithReplace(bookPath)
-
-        val epubBook = EpubBook()
-        epubBook.version = "2.0"
-        //set metadata
+    private suspend fun exportToEpub(
+        exportDir: File, book: Book, bookSource: String, userNameSpace: String,
+        useReplace: Boolean, useTemplate: Boolean, filterInteractiveImages: Boolean
+    ): File {
+        val bookFile = FileUtils.createFileWithReplace(FileUtils.getPath(exportDir, exportFilename(book, "epub")))
+        val source = BookSource.fromJson(bookSource, userNameSpace).getOrThrow()
+        val epubBook = EpubBook().apply { version = "2.0" }
         setEpubMetadata(book, epubBook)
-        //set cover
-        setCover(book, epubBook, bookSource)
-        //set css
-        val contentModel = setAssets(book, epubBook)
-
-        //设置正文
-        setEpubContent(contentModel, book, epubBook, bookSource, userNameSpace)
-        EpubWriter().write(epubBook, FileOutputStream(bookFile))
-
+        setCover(book, epubBook, source)
+        val contentModel = setAssets(book, epubBook, userNameSpace, useTemplate)
+        setEpubContent(contentModel, book, epubBook, bookSource, source, userNameSpace,
+            exportRules(userNameSpace, useReplace && book.useReplaceRule), filterInteractiveImages)
+        FileOutputStream(bookFile).use { EpubWriter().write(epubBook, it) }
         return bookFile
     }
 
-    private fun setAssets(book: Book, epubBook: EpubBook): String {
-        epubBook.resources.add(
-            Resource(
-                BookController::class.java.getResource("/epub/fonts.css").readBytes(),
-                "Styles/fonts.css"
-            )
-        )
-        epubBook.resources.add(
-            Resource(
-                BookController::class.java.getResource("/epub/main.css").readBytes(),
-                "Styles/main.css"
-            )
-        )
-        epubBook.resources.add(
-            Resource(
-                BookController::class.java.getResource("/epub/logo.png").readBytes(),
-                "Images/logo.png"
-            )
-        )
-        epubBook.addSection(
-            "封面",
-            ResourceUtil.createPublicResource(
-                book.name,
-                book.getRealAuthor(),
-                book.getDisplayIntro(),
-                book.kind,
-                book.wordCount,
-                String(BookController::class.java.getResource("/epub/cover.html").readBytes()),
-                "Text/cover.html"
-            )
-        )
-        epubBook.addSection(
-            "简介",
-            ResourceUtil.createPublicResource(
-                book.name,
-                book.getRealAuthor(),
-                book.getDisplayIntro(),
-                book.kind,
-                book.wordCount,
-                String(BookController::class.java.getResource("/epub/intro.html").readBytes()),
-                "Text/intro.html"
-            )
-        )
+    private fun templateStore(userNameSpace: String) =
+        EpubTemplateStore(storageDirectory("data", userNameSpace, "epub-template"))
 
-        return String(BookController::class.java.getResource("/epub/chapter.html").readBytes())
+    suspend fun getEpubTemplate(context: RoutingContext): ReturnData {
+        if (!checkAuth(context)) return ReturnData().setData("NEED_LOGIN").setErrorMsg("请登录后使用")
+        return ReturnData().setData(mapOf("files" to templateStore(getUserNameSpace(context)).files()))
     }
 
-    private suspend fun setCover(book: Book, epubBook: EpubBook, bookSourceString: String) {
-        val coverUrl = book.getDisplayCover()
-        if (coverUrl == null) {
-            // TODO 默认封面
+    suspend fun saveEpubTemplate(context: RoutingContext): ReturnData {
+        if (!checkAuth(context)) return ReturnData().setData("NEED_LOGIN").setErrorMsg("请登录后使用")
+        val uploads = context.fileUploads()
+        try {
+            require(uploads.size == 1) { "请上传一个 EPUB 模板 ZIP" }
+            val upload = uploads.single()
+            require(upload.fileName().endsWith(".zip", true)) { "EPUB 模板必须是 ZIP 文件" }
+            val file = File(upload.uploadedFileName())
+            require(file.length() in 1..(32L * 1024 * 1024)) { "EPUB 模板 ZIP 不能超过 32 MiB" }
+            return ReturnData().setData(mapOf("files" to templateStore(getUserNameSpace(context)).install(file)))
+        } catch (error: IllegalArgumentException) {
+            return ReturnData().setErrorMsg(error.message ?: "EPUB 模板无效")
+        } finally {
+            uploads.forEach { File(it.uploadedFileName()).delete() }
+        }
+    }
 
-        } else if (coverUrl.startsWith("/")) {
-            // 本地 /assets 封面
-            val coverFile = File(getWorkDir("storage", coverUrl.substring(1)))
-            val byteArray: ByteArray = coverFile.readBytes()
-            epubBook.coverImage = Resource(byteArray, "Images/cover.jpg")
-        } else {
-            var ext = getFileExt(coverUrl, "jpg")
-            val md5Encode = MD5Utils.md5Encode(coverUrl).toString()
-            var cachePath = getWorkDir("storage", "cache", md5Encode + "." + ext)
-            var cacheFile = File(cachePath)
-            if (cacheFile.exists()) {
-                val byteArray: ByteArray = cacheFile.readBytes()
-                epubBook.coverImage = Resource(byteArray, "Images/cover.jpg")
-                return;
-            }
-            val analyzeUrl = AnalyzeUrl(coverUrl, source = BookSource.fromJson(bookSourceString).getOrNull())
-            try {
-                analyzeUrl.getByteArrayAwait().let {
-                    epubBook.coverImage = Resource(it, "Images/cover.jpg")
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            } finally {
+    suspend fun deleteEpubTemplate(context: RoutingContext): ReturnData {
+        if (!checkAuth(context)) return ReturnData().setData("NEED_LOGIN").setErrorMsg("请登录后使用")
+        templateStore(getUserNameSpace(context)).clear()
+        return ReturnData().setData(mapOf("files" to emptyList<String>()))
+    }
 
+    private fun setAssets(book: Book, epubBook: EpubBook, userNameSpace: String, useTemplate: Boolean): String {
+        val fallbackCover = Resource(BookController::class.java.getResource("/epub/logo.png").readBytes(), "Images/cover.png")
+        val custom = if (useTemplate) templateStore(userNameSpace).apply(book, epubBook, fallbackCover) else null
+        if (epubBook.coverImage == null) epubBook.coverImage = fallbackCover
+        if (epubBook.resources.getByHref("Styles/main.css") == null) {
+            epubBook.resources.add(Resource(BookController::class.java.getResource("/epub/main.css").readBytes(), "Styles/main.css"))
+        }
+        fun addPublicPage(title: String, template: String, position: Int): Resource {
+            val model = String(BookController::class.java.getResource("/epub/$template.html").readBytes(), Charsets.UTF_8)
+                .replace("../Images/cover.jpg", "../${epubBook.coverImage.href}")
+            val page = ResourceUtil.createPublicResource(book.name, book.getRealAuthor(), book.getDisplayIntro(),
+                book.kind, book.wordCount, model, "Text/$template.html")
+            epubBook.addSection(title, page)
+            // Missing built-in pages belong before any template front matter and chapters.
+            epubBook.tableOfContents.tocReferences.apply { add(position.coerceAtMost(size - 1), removeAt(lastIndex)) }
+            epubBook.spine.spineReferences.apply { add(position.coerceAtMost(size - 1), removeAt(lastIndex)) }
+            return page
+        }
+        if (epubBook.guide.coverPage == null) epubBook.coverPage = addPublicPage("封面", "cover", 0)
+        if (epubBook.resources.all.none { it.href.matches(Regex("(?i)Text/intro\\.(html|xhtml)")) }) {
+            addPublicPage("简介", "intro", 1)
+        }
+        return custom ?: String(BookController::class.java.getResource("/epub/chapter.html").readBytes(), Charsets.UTF_8)
+    }
+
+    private suspend fun setCover(book: Book, epubBook: EpubBook, source: BookSource) {
+        val coverUrl = book.getDisplayCover().takeIf { !it.isNullOrBlank() } ?: return
+        try {
+            val local = if (coverUrl.startsWith('/')) File(getWorkDir("storage", coverUrl.substring(1))) else null
+            val cached = File(storageDirectory("cache"), "${MD5Utils.md5Encode(coverUrl)}.${getFileExt(coverUrl, "jpg")}")
+            val bytes = when {
+                local?.isFile == true -> SourceActions.decodeImage(source, coverUrl, local.readBytes(), true, book)
+                cached.isFile -> SourceActions.decodeImage(source, coverUrl, cached.readBytes(), true, book)
+                else -> SourceActions.imageBytes(source, coverUrl, true, book)
             }
-            // webClient.getAbs(coverUrl).timeout(3000).send
-            // webClient.getAbs(coverUrl).timeout(3000).send {
-            //     var bodyBytes = it.result()?.bodyAsBuffer()?.getBytes()
-            //     if (bodyBytes != null) {
-            //         epubBook.coverImage = Resource(bodyBytes, "Images/cover.jpg")
-            //     }
-            // }
+            epubBook.coverImage = EpubImages.cover(bytes)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            // FU also permits export without a failing cover; use a valid template/default image.
+            logger.warn(error) { "封面转换失败，使用模板或默认封面：${book.name}" }
         }
     }
 
     private suspend fun setEpubContent(
-        contentModel: String,
-        book: Book,
-        epubBook: EpubBook,
-        bookSourceString: String,
-        userNameSpace: String
+        contentModel: String, book: Book, epubBook: EpubBook, bookSourceString: String, source: BookSource,
+        userNameSpace: String, rules: List<io.legado.app.data.entities.ReplaceRule>, filterInteractiveImages: Boolean
     ) {
-        //正文
-        var chapterList = getLocalChapterList(book, bookSourceString, false, userNameSpace)
-        val localCacheDir = getChapterCacheDir(book, userNameSpace)
-
-        chapterList.forEachIndexed { index, chapter ->
-            var chapterCacheFile = File(localCacheDir.absolutePath + File.separator + index + ".txt")
-            var content = ""
-            if (!appConfig.exportNoChapterName) {
-                content += chapter.title + "\n"
-            }
-            if (chapterCacheFile.exists()) {
-                content += chapterCacheFile.readText() + "\n"
-            } else {
-                content += "暂无缓存内容。\n"
-            }
-
-            var content1 = fixPic(epubBook, book, content, chapter)
-            // content1 = contentProcessor
-            //     .getContent(
-            //         book,
-            //         chapter,
-            //         content1,
-            //         includeTitle = false,
-            //         useReplace = useReplace,
-            //         chineseConvert = false,
-            //         reSegment = false
-            //     )
-            //     .joinToString("\n")
-            val title = chapter.title
-            epubBook.addSection(
-                title,
-                ResourceUtil.createChapterResource(
-                    title.replace("\uD83D\uDD12", ""),
-                    content1,
-                    contentModel,
-                    "Text/chapter_${index}.html"
-                )
-            )
+        val chapters = getLocalChapterList(book, bookSourceString, false, userNameSpace)
+        val cache = getChapterCacheDir(book, userNameSpace)
+        var parentSection: TOCReference? = null
+        chapters.forEachIndexed { index, chapter ->
+            com.htmake.reader.api.service.ChapterEdits.apply(cache, chapter)
+            val text = checkNotNull(com.htmake.reader.api.service.ChapterCache.read(cache, index, chapter)) { "章节缓存缺失：${chapter.title}，请重新缓存全部章节" }
+            val title = com.htmake.reader.api.service.ContentReplacement.apply(com.htmake.reader.api.service.ChapterMetadata.read(cache, chapter).getString("title", chapter.title), rules, book, title = true)
+                .replace("\uD83D\uDD12", "")
+            val body = EpubImages.embed(epubBook, book, com.htmake.reader.api.service.ContentReplacement.apply(text, rules, book), chapter, source, filterInteractiveImages)
+            val resource = ResourceUtil.createChapterResource(title, body, contentModel, "Text/chapter_${index}.html")
+            if (chapter.isVolume) parentSection = epubBook.addSection(title, resource)
+            else if (parentSection != null) epubBook.addSection(parentSection, title, resource)
+            else epubBook.addSection(title, resource)
         }
-    }
-
-    private fun fixPic(
-        epubBook: EpubBook,
-        book: Book,
-        content: String,
-        chapter: BookChapter
-    ): String {
-        val data = StringBuilder("")
-        content.split("\n").forEach { text ->
-            var text1 = text
-            val matcher = AppPattern.imgPattern.matcher(text)
-            while (matcher.find()) {
-                matcher.group(1)?.let {
-                    val src = NetworkUtils.getAbsoluteURL(chapter.url, it)
-                    val originalHref = "${MD5Utils.md5Encode16(src)}.${BookHelp.getImageSuffix(src)}"
-                    val href = "Images/${MD5Utils.md5Encode16(src)}.${BookHelp.getImageSuffix(src)}"
-                    val vFile = BookHelp.getImage(book, src)
-                    val fp = FileResourceProvider(vFile.parent)
-                    if (vFile.exists()) {
-                        val img = LazyResource(fp, href, originalHref)
-                        epubBook.resources.add(img)
-                    }
-                    text1 = text1.replace(src, "../${href}")
-                }
-            }
-            data.append(text1).append("\n")
-        }
-        return data.toString()
     }
 
     private fun setEpubMetadata(book: Book, epubBook: EpubBook) {
@@ -3122,10 +3046,10 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var size: Int
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
-            bookUrl = context.bodyAsJson.getString("url") ?: context.bodyAsJson.getString("bookUrl") ?: ""
-            keyword = context.bodyAsJson.getString("keyword") ?: ""
-            lastIndex = context.bodyAsJson.getInteger("lastIndex", 0)
-            size = context.bodyAsJson.getInteger("size", 20)
+            bookUrl = context.body().asJsonObject().getString("url") ?: context.body().asJsonObject().getString("bookUrl") ?: ""
+            keyword = context.body().asJsonObject().getString("keyword") ?: ""
+            lastIndex = context.body().asJsonObject().getInteger("lastIndex", 0)
+            size = context.body().asJsonObject().getInteger("size", 20)
         } else {
             // get 请求
             bookUrl = context.queryParam("url").firstOrNull() ?: ""
@@ -3160,11 +3084,11 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
 
         var isEnd = false
         context.request().connection().closeHandler{
-            logger.info("客户端已断开链接，停止 searchBookContent")
+            logger.info { "客户端已断开链接，停止 searchBookContent" }
             isEnd = true
         }
 
-        logger.info("searchBookContent keyword: {} lastIndex: {}", keyword, lastIndex)
+        logger.info { "searchBookContent keyword: ${keyword} lastIndex: ${lastIndex}" }
         var resultList = mutableListOf<SearchResult>();
         lastIndex += 1
         var currentIndex = lastIndex
@@ -3201,7 +3125,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             //     ).joinToString("")
             // }
             val positions = searchPosition(chapterContent, query)
-            logger.info("positions: {}", positions)
+            logger.info { "positions: ${positions}" }
             positions.forEachIndexed { index, position ->
                 val construct = getResultAndQueryIndex(chapterContent, position, query)
                 val result = SearchResult(

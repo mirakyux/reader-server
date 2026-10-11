@@ -1,121 +1,13 @@
-self.addEventListener("message", event => {
-  if (event.data && event.data.type === "CLEAR_HOME_CACHE") {
-    self.caches.delete("home");
-  }
-});
-
-workbox.routing.setDefaultHandler(async ({ event }) => {
-  let { request, target } = event;
-
-  // 处理首页请求 networkFirst
-  try {
-    const url = new URL(request.url);
-    if (
-      url.origin === target.origin &&
-      (!url.pathname || url.pathname === "/")
-    ) {
-      const homeCache = await self.caches.open("home");
-      return fetch(request)
-        .then(fetchRes => {
-          if (fetchRes.type !== "opaque") {
-            let resClone = fetchRes.clone();
-            homeCache.put(request, fetchRes);
-            return resClone;
-          }
-        })
-        .catch(() => {
-          return homeCache.match(request);
-        });
-    }
-  } catch (error) {
-    //
-  }
-
-  // 判断是否有 precache
-  const precache = await self.caches.open(workbox.core.cacheNames.precache);
-  const precacheRes = await precache.match(
-    workbox.precaching.getCacheKeyForURL(request.url)
-  );
-  if (precacheRes) {
-    return precacheRes;
-  }
-
-  // 处理api请求 networkOnly
-  if (request.url.indexOf("/reader3/") !== -1) {
-    return fetch(request);
-  }
-
-  const siteCache = await self.caches.open("SITE_CAHCE");
-  const opaqueCache = await self.caches.open("OPAQUE_CAHCE");
-
-  /**
-   *
-   * @param {Response} res
-   */
-  const isImage = function(res) {
-    const contentType = res.headers.get("Content-Type");
-    if (contentType && contentType.indexOf("image/") !== -1) {
-      return true;
-    }
-    return false;
-  };
-
-  /**
-   *
-   * @param {Response} res
-   */
-  const isFont = function(res) {
-    const contentType = res.headers.get("Content-Type");
-    if (contentType && contentType.indexOf("application/x-font") !== -1) {
-      return true;
-    }
-    return false;
-  };
-
-  // 通用请求，缓存 opaque 资源 和 图片资源
-  const doRequest = function(request) {
-    var originRequest = request;
-    // 站外资源去掉 referrer
-    if (
-      request.mode !== "navigate" &&
-      request.url.indexOf(request.referrer) === -1
-    ) {
-      // 站外资源强制缓存
-      request = new Request(request, { referrer: "" });
-    }
-
-    // 对于不在 caches 中的资源进行请求
-    return fetch(request).then(fetchRes => {
-      if (fetchRes.type === "opaque") {
-        let resClone = fetchRes.clone();
-        opaqueCache.put(originRequest, fetchRes);
-        return resClone;
-      }
-      // 这里只缓存成功 && 请求是 GET 方式的结果，对于 POST 等请求，可把 indexDB 给用上
-      if (!fetchRes || fetchRes.status !== 200 || request.method !== "GET") {
-        return fetchRes;
-      }
-
-      // 只能缓存同源的图片、字体，跨域的资源都访问不了
-      let resClone = fetchRes.clone();
-      if (isImage(fetchRes) || isFont(fetchRes)) {
-        siteCache.put(originRequest, fetchRes);
-      }
-
-      return resClone;
-    });
-  };
-
-  // 先从 caches 中寻找是否有匹配
-  return opaqueCache.match(request).then(res => {
-    if (res) {
-      return res;
-    }
-    return siteCache.match(request).then(res => {
-      if (res) {
-        return res;
-      }
-      return doRequest(request);
-    });
-  });
+const SHELL = 'reader-shell-v1';
+const scopes = new Map();
+const appPath = (path) => path === '/' || path === '/index.html' || /^\/(static\/|src\/|node_modules\/\.vite\/|@vite\/|@react-refresh$)/.test(path);
+self.addEventListener('install', (event) => { event.waitUntil(caches.open(SHELL).then(async (cache) => { await cache.add('/'); await self.skipWaiting(); })); });
+self.addEventListener('activate', (event) => { event.waitUntil(self.clients.claim()); });
+self.addEventListener('message', (event) => { if (event.source?.id && event.data?.type === 'scope' && /^reader-resources-v1-[A-Za-z0-9_-]+$/.test(event.data.cache)) { const id = event.source.id; scopes.set(id, event.data.cache); event.waitUntil(caches.open(SHELL).then((cache) => cache.put(`/__reader_offline_scope?client=${encodeURIComponent(id)}`, new Response(event.data.cache)))); } });
+self.addEventListener('fetch', (event) => {
+  const request = event.request; const url = new URL(request.url); if (request.method !== 'GET' || (/\/(reader3)\//.test(url.pathname) && !url.pathname.endsWith('/cover'))) return;
+  event.respondWith((async () => {
+    try { const response = await fetch(request); if (response.ok && url.origin === self.location.origin && appPath(url.pathname)) { const cache = await caches.open(SHELL); await cache.put(request, response.clone()); } return response; }
+    catch (error) { const shell = await caches.open(SHELL); const id = event.clientId; let resourceCache = scopes.get(id); if (!resourceCache && id) { resourceCache = await (await shell.match(`/__reader_offline_scope?client=${encodeURIComponent(id)}`))?.text(); if (resourceCache) scopes.set(id, resourceCache); } const cached = (appPath(url.pathname) ? await shell.match(request) : undefined) || (resourceCache ? await (await caches.open(resourceCache)).match(request) : undefined); if (cached) return cached; if (request.mode === 'navigate') { const root = await shell.match('/'); if (root) return root; } throw error; }
+  })());
 });

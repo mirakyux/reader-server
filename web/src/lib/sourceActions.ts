@@ -1,0 +1,5 @@
+import { api } from './api';
+import type { Book, Chapter } from '../types';
+export interface SourceInteraction { id: string; type: 'browser' | 'video'; url: string; title?: string; bookSourceUrl?: string; sourceType?: 'book' | 'rss' }
+export function consumeSourceActions(result: { actions?: SourceInteraction[] }, bookSourceUrl?: string, sourceType: 'book' | 'rss' = 'book') { if (result.actions?.length) window.dispatchEvent(new CustomEvent('reader:source-actions', { detail: result.actions.map((action) => ({ ...action, bookSourceUrl: action.bookSourceUrl || bookSourceUrl, sourceType: action.sourceType || sourceType })) })); }
+export async function sourceEvent(book: Book, event: string, chapter?: Chapter): Promise<boolean> { if (!book.origin || book.origin === 'loc_book') return false; try { const result = await api.post<{ actions?: SourceInteraction[]; handled?: boolean }>('runSourceAction', { bookSourceUrl: book.origin, action: 'event', event, book, chapter }); consumeSourceActions(result, book.origin); return result.handled === true; } catch { return false; } }
